@@ -62,7 +62,7 @@ This MCP reads and writes your personal WhatsApp. Treat it as equivalent to your
 7. **No telemetry.** Zero external network calls except:
    - WhatsApp's multidevice endpoint (required for the tool to function).
    - OpenAI Whisper API only if `WHATSAPP_WHISPER_BACKEND=openai-api` is explicitly set (default is local `whisper.cpp`).
-   - The host named by `file_url` on a `send_file` / `send_audio` draft, and only when the caller passes one. This is the only call whose destination the caller chooses, which is why it is guarded separately — see decision 11.
+   - The host named by `file_url` on a send draft (`POST /api/sends` with `send_type: file|audio`; the Python `send_message` tool does not currently expose `file_url`), and only when the caller passes one. This is the only call whose destination the caller chooses, which is why it is guarded separately — see decision 11.
 
 8. **No webhooks by default.** Set `WHATSAPP_WEBHOOK_URL` to enable; off by default.
 
@@ -96,7 +96,7 @@ This MCP reads and writes your personal WhatsApp. Treat it as equivalent to your
 
 10. **MIT license + threat model.** Publishing as public GitHub repo with explicit threat model so contributors and forkers know the security expectations upfront.
 
-11. **`file_url` downloads are SSRF-guarded.** `send_file` / `send_audio` accept a `file_url` the bridge fetches itself, because a remote client has no filesystem here and `file_base64` cannot carry more than about 100 KB through the model's context. That makes the bridge issue requests to a host the *caller* chose, from inside the user's home network, with the response body ending up in a WhatsApp message. Four controls in `whatsapp-bridge/fetch_url.go` bound it:
+11. **`file_url` downloads are SSRF-guarded.** The bridge send endpoint (`send_type: file|audio`) accepts a `file_url` it fetches itself, because a remote client has no filesystem here and `file_base64` cannot carry more than about 100 KB through the model's context. That makes the bridge issue requests to a host the *caller* chose, from inside the user's home network, with the response body ending up in a WhatsApp message. Four controls in `whatsapp-bridge/fetch_url.go` bound it:
 
     1. **Every redirect hop is revalidated,** via `http.Client.CheckRedirect`, which runs per hop by construction. Validating only the submitted URL would let a `302 → 169.254.169.254` through and put instance-metadata credentials into a chat. Capped at 5 hops.
 
