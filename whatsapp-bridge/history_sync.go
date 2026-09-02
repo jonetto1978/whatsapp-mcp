@@ -345,6 +345,80 @@ func (b *Bridge) RequestChatHistory(ctx context.Context, chatJID string, count i
 	return
 }
 
+// OldestAnchor finds the OLDEST message we hold for a contact, looking under
+// every JID alias (LID and phone forms) so a chat whose early history sits
+// under the phone JID and whose recent traffic sits under the LID is treated
+// as one conversation. Returns the row's own chat_jid: the history request
+// must name the conversation the anchor message actually belongs to.
+type historyAnchor struct {
+	ID      string
+	TS      int64
+	FromMe  bool
+	ChatJID string
+}
+
+func (b *Bridge) OldestAnchor(ctx context.Context, chatJID string) (historyAnchor, error) {
+	jids, err := resolveAliases(ctx, b.db, chatJID)
+	if err != nil || len(jids) == 0 {
+		jids = []string{chatJID}
+	}
+	var (
+		a        historyAnchor
+		isFromMe int
+	)
+	q := `SELECT id, timestamp, is_from_me, chat_jid FROM messages
+	      WHERE chat_jid IN (` + inClausePlaceholders(len(jids)) + `)
+	      ORDER BY timestamp ASC LIMIT 1`
+	err = b.db.QueryRowContext(ctx, q, jidsToArgs(jids)...).Scan(&a.ID, &a.TS, &isFromMe, &a.ChatJID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return a, fmt.Errorf("no existing messages for chat %s (or its aliases); cannot anchor history request", chatJID)
+		}
+		return a, fmt.Errorf("query oldest message: %w", err)
+	}
+	a.FromMe = isFromMe == 1
+	return a, nil
+}
+
+// RequestOlderHistory is the "go further back" request: it anchors on the
+// OLDEST message we hold (across aliases) and asks WhatsApp for the `count`
+// messages before it. This is the opposite anchor from RequestChatHistory,
+// whose newest-row anchor exists to re-fetch the window we already have.
+//
+// With walk=true the delivered chunk re-anchors on its own oldest message and
+// requests again, bounded by maxRounds (per chat) and the walker's global
+// budget; see backfill_walk.go for the brakes. Measured 2026-09-02 on a chat
+// whose local history began that morning: the newest-anchor request returned
+// the same 50 rows and "inserted 0 new"; this path is what reaches March.
+func (b *Bridge) RequestOlderHistory(ctx context.Context, chatJID string, count int, walk bool, maxRounds int) (historyAnchor, whatsmeow.SendResponse, error) {
+	var resp whatsmeow.SendResponse
+	if !b.IsConnected() {
+		return historyAnchor{}, resp, errors.New("bridge not connected; cannot request history")
+	}
+	if count <= 0 {
+		count = 100
+	}
+	if count > 200 {
+		count = 200
+	}
+	if maxRounds <= 0 {
+		maxRounds = 10
+	}
+	a, err := b.OldestAnchor(ctx, chatJID)
+	if err != nil {
+		return a, resp, err
+	}
+	// Register the walk BEFORE sending, so the chunk's delivery finds it.
+	if walk && b.walker != nil {
+		b.walker.extendBudget(maxRounds)
+		if !b.walker.beginMode(a.ChatJID, a.TS, count, "older", maxRounds) {
+			return a, resp, errors.New("walk budget exhausted")
+		}
+	}
+	resp, err = b.RequestHistoryBefore(ctx, a.ChatJID, a.ID, a.TS, a.FromMe, count)
+	return a, resp, err
+}
+
 // RequestHistoryBefore asks WhatsApp for the `count` messages immediately
 // before an EXPLICIT anchor, rather than before the newest row we hold.
 //

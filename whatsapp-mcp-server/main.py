@@ -553,8 +553,14 @@ async def download_media(message_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def request_history(chat_jid: str, count: int = 20) -> dict[str, Any]:
-    """Ask WhatsApp for OLDER messages in a chat than what auto-synced. This
+async def request_history(
+    chat_jid: str,
+    count: int = 100,
+    direction: str = "older",
+    walk: bool = True,
+    max_rounds: int = 10,
+) -> dict[str, Any]:
+    """Ask WhatsApp for OLDER messages in a chat than the bridge holds. This
     is a REAL, asynchronous request to WhatsApp's servers — not instant and
     not free of traffic. The response only confirms the request was SENT;
     older messages typically land within a few seconds and become visible
@@ -563,12 +569,24 @@ async def request_history(chat_jid: str, count: int = 20) -> dict[str, Any]:
     Media in the newly-arrived messages is metadata-only until download_media
     is called per message.
 
+    direction="older" (default) anchors on the OLDEST message held for the
+    contact — across its LID and phone-number aliases — and asks for the
+    `count` messages before it. With walk=True the bridge keeps stepping
+    back one window at a time as each chunk lands, up to max_rounds windows
+    (so up to count × max_rounds messages), then stops. direction="newest"
+    is the old behaviour: re-fetch the most recent window already held,
+    useful only to recover media keys; it never goes further back.
+
     Args:
         chat_jid: The chat or group JID to request older history for.
-        count: How many older messages to request.
+        count: Messages per window (bridge caps at 200).
+        direction: "older" (go back in time) or "newest" (re-fetch held window).
+        walk: Keep stepping backwards automatically (older only).
+        max_rounds: Cap on windows for this walk.
     """
     start = time.time()
-    body = {"chat_jid": chat_jid, "count": count}
+    body = {"chat_jid": chat_jid, "count": count, "anchor": direction,
+            "walk": walk, "max_rounds": max_rounds}
     try:
         result = await _bridge_post("/api/admin/request-history", body)
         result["hint"] = (

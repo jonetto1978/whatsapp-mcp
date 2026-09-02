@@ -29,6 +29,21 @@ Known operational pain points and how to recover. Each entry: symptom → cause 
 - Close any WhatsApp Web browser tabs that were paired to the same device slot.
 - Restart the bridge. It will re-attach to the same session if `store/` is intact — no re-pair needed.
 
+## `request_history` never goes further back than what is already synced
+
+**Symptom.** `request_history(chat_jid)` returns OK, the log shows a chunk arrive, but `list_messages(before=<oldest>)`
+stays empty and the log says `inserted 0 new`.
+
+**Cause (fixed in 0.4.0, 2026-09-02).** The request anchored on the **newest** local message, so WhatsApp returned
+the window already held. That anchor exists on purpose for media-key recovery (`RequestChatHistory`), but it can
+never reach older history, and the backwards walker only engaged for the content-repair sweep.
+
+**Now.** `POST /api/admin/request-history` defaults to `anchor: "oldest"` (across the contact's LID + phone aliases)
+with `walk: true`, stepping back one window per delivered chunk until `max_rounds` (default 10), the global budget,
+or no progress. The MCP tool exposes `direction`, `walk`, `max_rounds`. Measured 2026-09-02: a chat whose local
+history began that morning walked back to March in three rounds (50 + 50 + 23 rows) and stopped on `no_progress`.
+`anchor: "newest"` keeps the old media-key behaviour.
+
 ## Contact's recent messages look "silent" / search returns no history
 
 **Symptom.** A contact you've definitely been messaging shows no recent messages, or `search_contacts` returns the contact but `list_messages` for that JID is empty.

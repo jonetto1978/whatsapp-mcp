@@ -67,6 +67,18 @@ type walkState struct {
 	lastReqAt  time.Time
 	perChat    int
 	stopReason string
+
+	// mode selects which brakes apply. "repair" is the MYC-3284 content
+	// backfill: stop when no empty rows remain further back (brake 3).
+	// "older" is a plain history fetch requested through the API: there is
+	// nothing to repair, so brake 3 must not apply or the walk would stop
+	// after one window every time. Brakes 1, 2 and 4 apply to both.
+	mode string
+
+	// maxRounds, when > 0, caps this chat's rounds independently of the
+	// walker-wide ceiling. Set per request so an ad-hoc "fetch older" walk
+	// can be bounded by its caller.
+	maxRounds int
 }
 
 // backfillWalker coordinates the walks. One instance per Bridge.
@@ -111,11 +123,20 @@ func (w *backfillWalker) reset(budget, maxRounds, perChat int) {
 // begin registers the first request for a chat. Returns false when the global
 // budget is exhausted, so the caller does not issue the request at all.
 func (w *backfillWalker) begin(chatJID string, anchorTS int64, perChat int) bool {
+	return w.beginMode(chatJID, anchorTS, perChat, "repair", 0)
+}
+
+// beginMode is begin with an explicit mode and an optional per-chat round cap
+// (0 = walker default). See walkState.mode for what the modes mean.
+func (w *backfillWalker) beginMode(chatJID string, anchorTS int64, perChat int, mode string, maxRounds int) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.spent >= w.budget {
 		w.stopped["global_budget"]++
 		return false
+	}
+	if mode == "" {
+		mode = "repair"
 	}
 	w.spent++
 	w.chats[chatJID] = &walkState{
@@ -123,8 +144,40 @@ func (w *backfillWalker) begin(chatJID string, anchorTS int64, perChat int) bool
 		anchorTS:  anchorTS,
 		lastReqAt: time.Now(),
 		perChat:   perChat,
+		mode:      mode,
+		maxRounds: maxRounds,
 	}
 	return true
+}
+
+// extendBudget raises the global budget by n so an ad-hoc walk started from
+// the API is not refused just because earlier sweeps spent the sweep budget.
+// The budget is a brake against runaway self-propelled walks, not a quota on
+// operator-initiated ones; each API walk is separately capped by maxRounds.
+func (w *backfillWalker) extendBudget(n int) {
+	if n <= 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.spent+n > w.budget {
+		w.budget = w.spent + n
+	}
+}
+
+// resolveKey returns the first candidate JID that has an active walk, or "".
+// History chunks come back under whichever JID form WhatsApp chose for the
+// conversation (LID or phone), which need not be the form the walk was
+// registered under; callers pass every alias so the walk is found either way.
+func (w *backfillWalker) resolveKey(candidates []string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, c := range candidates {
+		if _, ok := w.chats[c]; ok {
+			return c
+		}
+	}
+	return ""
 }
 
 // walkDecision is what a delivered chunk should cause next.
@@ -164,12 +217,17 @@ func (w *backfillWalker) next(chatJID string, chunkOldestTS int64, hasOlderEmpti
 	if chunkOldestTS <= 0 || chunkOldestTS >= st.anchorTS {
 		return stop("no_progress")
 	}
-	// Brake 3: nothing left worth fetching further back.
-	if !hasOlderEmpties {
+	// Brake 3: nothing left worth fetching further back. Repair mode only —
+	// a plain "older" fetch has nothing to repair, so this would always fire.
+	if st.mode != "older" && !hasOlderEmpties {
 		return stop("nothing_older")
 	}
-	// Brake 1: per-chat ceiling.
-	if st.rounds >= w.maxRounds {
+	// Brake 1: per-chat ceiling (per-request cap wins when set).
+	limit := w.maxRounds
+	if st.maxRounds > 0 {
+		limit = st.maxRounds
+	}
+	if st.rounds >= limit {
 		return stop("max_rounds")
 	}
 	// Brake 4: global budget across all chats.
@@ -236,13 +294,29 @@ func (b *Bridge) continueWalk(ctx context.Context, chatJID string, oldest chunkA
 		return
 	}
 
+	// The walk may have been registered under an alias of the JID WhatsApp
+	// delivered the chunk under (LID vs phone form). Look it up under every
+	// known form; if none is walking, this chunk was unsolicited.
+	candidates := []string{chatJID}
+	if aliases, aerr := resolveAliases(ctx, b.db, chatJID); aerr == nil {
+		for _, a := range aliases {
+			if a != chatJID {
+				candidates = append(candidates, a)
+			}
+		}
+	}
+	key := b.walker.resolveKey(candidates)
+	if key == "" {
+		return
+	}
+
 	hasOlder, err := b.hasEmptyRowsOlderThan(ctx, chatJID, oldest.TS)
 	if err != nil {
 		log.Printf("backfill walk: older-empties check for %s failed: %v", chatJID, err)
 		return
 	}
 
-	d := b.walker.next(chatJID, oldest.TS, hasOlder)
+	d := b.walker.next(key, oldest.TS, hasOlder)
 	if !d.Continue {
 		if d.Reason != "not_walking" {
 			log.Printf("backfill walk: %s stopped (%s)", chatJID, d.Reason)

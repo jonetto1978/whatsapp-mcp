@@ -86,6 +86,17 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 	type req struct {
 		ChatJID string `json:"chat_jid"`
 		Count   int    `json:"count"`
+		// Anchor selects which end of the local history the request is
+		// anchored on. "oldest" (default) fetches messages we do NOT have —
+		// further back in time. "newest" re-fetches the window we already
+		// hold, which is only useful to recover media keys.
+		Anchor string `json:"anchor"`
+		// Walk keeps stepping backwards after each delivered chunk (oldest
+		// anchor only). Defaults to true; bounded by MaxRounds.
+		Walk *bool `json:"walk"`
+		// MaxRounds caps the walk for this chat (default 10 → up to
+		// 10 × count messages).
+		MaxRounds int `json:"max_rounds"`
 	}
 	var body req
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&body); err != nil {
@@ -96,26 +107,56 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "chat_jid required"})
 		return
 	}
+	if body.Anchor == "" {
+		body.Anchor = "oldest"
+	}
+	walk := true
+	if body.Walk != nil {
+		walk = *body.Walk
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	anchorID, resp, err := s.bridge.RequestChatHistory(ctx, body.ChatJID, body.Count)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{
-			Error:   "history request failed",
-			Details: err.Error(),
+	if body.Anchor == "newest" {
+		anchorID, resp, err := s.bridge.RequestChatHistory(ctx, body.ChatJID, body.Count)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "history request failed", Details: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"chat_jid":        body.ChatJID,
+			"anchor":          "newest",
+			"anchor_message":  anchorID,
+			"requested_count": body.Count,
+			"sent_message_id": resp.ID,
+			"sent_at_unix":    resp.Timestamp.Unix(),
+			"hint":            "Newest-anchor request: re-fetches the window already held (media-key recovery). It does not go further back — use anchor=oldest for that.",
 		})
 		return
 	}
+	if body.Anchor != "oldest" {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "anchor must be \"oldest\" or \"newest\""})
+		return
+	}
 
+	a, resp, err := s.bridge.RequestOlderHistory(ctx, body.ChatJID, body.Count, walk, body.MaxRounds)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "history request failed", Details: err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"chat_jid":        body.ChatJID,
-		"anchor_message":  anchorID,
+		"anchor":          "oldest",
+		"anchor_message":  a.ID,
+		"anchor_ts":       a.TS,
+		"anchor_chat_jid": a.ChatJID,
 		"requested_count": body.Count,
+		"walk":            walk,
+		"max_rounds":      body.MaxRounds,
 		"sent_message_id": resp.ID,
 		"sent_at_unix":    resp.Timestamp.Unix(),
-		"hint":            "WhatsApp delivers the response asynchronously over the history-sync stream. Watch ~/Library/Logs/whatsapp-bridge.stdout.log for 'history_sync: backfilled media-key for N rows' lines, then re-run any consumers that need the historical media (e.g. POST /api/media/download for individual receipts).",
+		"hint":            "Anchored on the OLDEST local message; WhatsApp delivers the window before it asynchronously. With walk=true each delivered chunk re-anchors on its own oldest message and requests again, until max_rounds, the global budget, or no progress. Poll list_messages(chat_jid, before=<previous oldest id>) — the oldest id moves back as chunks land. Watch the bridge log for 'backfill walk: … stepping back' / 'stopped (…)'.",
 	})
 }
 

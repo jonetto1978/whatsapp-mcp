@@ -274,3 +274,79 @@ func TestHasEmptyRowsOlderThan(t *testing.T) {
 func chatID(i int) string {
 	return string(rune('a'+i%26)) + "-chat@g.us"
 }
+
+// TestOlderModeIgnoresEmptiesBrake: a plain history fetch has nothing to
+// repair, so "no empty rows further back" must not stop it — that brake is
+// exactly why the MCP request_history tool could never go past one window.
+func TestOlderModeIgnoresEmptiesBrake(t *testing.T) {
+	w := newWalkerForTest(100, 10)
+	if !w.beginMode("c@lid", 5000, 100, "older", 0) {
+		t.Fatal("beginMode returned false")
+	}
+	d := w.next("c@lid", 4000, false)
+	if !d.Continue {
+		t.Fatalf("older-mode walk stopped (%s) on hasOlderEmpties=false; want continue", d.Reason)
+	}
+	// Repair mode must still stop on the same input.
+	w2 := newWalkerForTest(100, 10)
+	w2.begin("r@lid", 5000, 100)
+	if d2 := w2.next("r@lid", 4000, false); d2.Continue || d2.Reason != "nothing_older" {
+		t.Fatalf("repair-mode: got continue=%v reason=%q, want stop nothing_older", d2.Continue, d2.Reason)
+	}
+}
+
+// TestOlderModeStillStopsOnNoProgress: the replay brake must apply to older
+// mode too, or a server that keeps returning the same window loops forever.
+func TestOlderModeStillStopsOnNoProgress(t *testing.T) {
+	w := newWalkerForTest(100, 10)
+	w.beginMode("c@lid", 5000, 100, "older", 0)
+	if d := w.next("c@lid", 5000, false); d.Continue || d.Reason != "no_progress" {
+		t.Fatalf("got continue=%v reason=%q, want stop no_progress", d.Continue, d.Reason)
+	}
+}
+
+// TestPerRequestMaxRoundsCapsBelowWalkerDefault: an API caller's max_rounds
+// bounds its own walk even when the walker-wide ceiling is higher.
+func TestPerRequestMaxRoundsCapsBelowWalkerDefault(t *testing.T) {
+	w := newWalkerForTest(100, 20)
+	w.beginMode("c@lid", 9000, 100, "older", 3)         // round 1
+	if d := w.next("c@lid", 8000, false); !d.Continue { // round 2
+		t.Fatalf("round 2 stopped early: %s", d.Reason)
+	}
+	if d := w.next("c@lid", 7000, false); !d.Continue { // round 3
+		t.Fatalf("round 3 stopped early: %s", d.Reason)
+	}
+	if d := w.next("c@lid", 6000, false); d.Continue || d.Reason != "max_rounds" {
+		t.Fatalf("round 4: got continue=%v reason=%q, want stop max_rounds", d.Continue, d.Reason)
+	}
+}
+
+// TestResolveKeyFindsWalkUnderAlias: chunks arrive under whichever JID form
+// WhatsApp picked; the walk registered under the other form must be found.
+func TestResolveKeyFindsWalkUnderAlias(t *testing.T) {
+	w := newWalkerForTest(100, 10)
+	w.beginMode("5491100000000@s.whatsapp.net", 5000, 100, "older", 0)
+	if got := w.resolveKey([]string{"123@lid", "5491100000000@s.whatsapp.net"}); got != "5491100000000@s.whatsapp.net" {
+		t.Fatalf("resolveKey = %q, want the registered alias", got)
+	}
+	if got := w.resolveKey([]string{"nobody@lid"}); got != "" {
+		t.Fatalf("resolveKey = %q for an unregistered chat, want empty", got)
+	}
+}
+
+// TestExtendBudgetOnlyRaises: extending never lowers, and only raises when
+// the ask would not fit.
+func TestExtendBudgetOnlyRaises(t *testing.T) {
+	w := newWalkerForTest(5, 10)
+	w.extendBudget(3) // spent 0, budget 5: fits, unchanged
+	if w.budget != 5 {
+		t.Fatalf("budget = %d, want 5 (unchanged)", w.budget)
+	}
+	for i := 0; i < 5; i++ {
+		w.begin("c"+string(rune('a'+i))+"@lid", 1000, 10)
+	}
+	w.extendBudget(2) // spent 5 == budget 5: raise to 7
+	if w.budget != 7 {
+		t.Fatalf("budget = %d, want 7", w.budget)
+	}
+}
