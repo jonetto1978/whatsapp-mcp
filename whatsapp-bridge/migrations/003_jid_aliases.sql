@@ -1,3 +1,6 @@
+-- Wrapped in a transaction 2026-09-02: a partial failure left autocommitted
+-- ALTERs behind and boot-looped on "duplicate column" (review finding).
+BEGIN;
 -- 003: jid_aliases — symmetric JID alias map (LID ↔ phone-number JID).
 --
 -- Background: WhatsApp's privacy rollout migrated direct chats to
@@ -31,3 +34,4 @@ CREATE INDEX IF NOT EXISTS idx_jid_aliases_b ON jid_aliases(jid_b);
 
 INSERT OR IGNORE INTO schema_version (version, applied_at, description)
 VALUES (3, strftime('%s', 'now'), 'jid_aliases: symmetric LID ↔ PN alias map');
+COMMIT;

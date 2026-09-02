@@ -244,6 +244,29 @@ func (b *Bridge) handleEvent(raw interface{}) {
 				log.Printf("re-login after logout failed: %v (POST /api/auth/reconnect to retry)", err)
 			}
 		}()
+	// Terminal connection events. whatsmeow calls expectDisconnect() on every
+	// one of these BEFORE dispatching, which suppresses both events.Disconnected
+	// and its own autoReconnect — so without these cases the socket dies,
+	// b.connected stays true forever, /api/status reports connected, sends are
+	// accepted, and inbound is lost silently (review finding, 2026-09-02).
+	case *events.StreamReplaced:
+		b.markDisconnected("stream replaced by another session")
+		b.requestFatalShutdown()
+	case *events.ClientOutdated:
+		b.markDisconnected("client outdated (whatsmeow needs an upgrade)")
+		b.requestFatalShutdown()
+	case *events.TemporaryBan:
+		b.markDisconnected(fmt.Sprintf("temporary ban: %+v", evt))
+		b.requestFatalShutdown()
+	case *events.ConnectFailure:
+		b.markDisconnected(fmt.Sprintf("connect failure: %+v", evt))
+		b.scheduleRelogin("connect failure")
+	case *events.CATRefreshError:
+		b.markDisconnected(fmt.Sprintf("CAT refresh error: %+v", evt))
+		b.scheduleRelogin("CAT refresh error")
+	case *events.StreamError:
+		b.markDisconnected(fmt.Sprintf("stream error: %+v", evt))
+		b.scheduleRelogin("stream error")
 	case *events.PairSuccess:
 		b.mu.Lock()
 		b.authenticated = true
@@ -281,6 +304,30 @@ func (b *Bridge) handleEvent(raw interface{}) {
 			log.Printf("JoinedGroup: %v", err)
 		}
 	}
+}
+
+// markDisconnected clears the connected flag under lock and logs why. Used by
+// the terminal-event cases above, where whatsmeow will not emit Disconnected.
+func (b *Bridge) markDisconnected(reason string) {
+	b.mu.Lock()
+	b.connected = false
+	b.mu.Unlock()
+	log.Printf("whatsmeow: connection lost — %s", reason)
+}
+
+// scheduleRelogin retries loginLoop after a short delay, the same way the
+// LoggedOut case does, for failures that are worth retrying in-process.
+func (b *Bridge) scheduleRelogin(reason string) {
+	go func() {
+		select {
+		case <-b.rootCtx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+		if err := b.loginLoop(b.rootCtx); err != nil && b.rootCtx.Err() == nil {
+			log.Printf("re-login after %s failed: %v (POST /api/auth/reconnect to retry)", reason, err)
+		}
+	}()
 }
 
 // onMessage persists an incoming or outgoing message.

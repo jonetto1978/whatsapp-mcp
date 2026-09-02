@@ -122,6 +122,9 @@ func TestCheckSizeLimit(t *testing.T) {
 // --- materializeOutboundFile ------------------------------------------------
 
 func TestMaterializeFromPath(t *testing.T) {
+	// Send roots are enforced since 2026-09-02; fixtures live in t.TempDir(),
+	// so declare it as the allowed root for this test.
+	t.Setenv("WHATSAPP_SEND_FILE_ROOTS", os.TempDir())
 	cfg := testConfig(t)
 	src := filepath.Join(t.TempDir(), "photo.png")
 	if err := os.WriteFile(src, tinyPNG, 0o600); err != nil {
@@ -177,6 +180,9 @@ func TestMaterializeFromBase64(t *testing.T) {
 }
 
 func TestMaterializeRejectsBadInput(t *testing.T) {
+	// Send roots are enforced since 2026-09-02; fixtures live in t.TempDir(),
+	// so declare it as the allowed root for this test.
+	t.Setenv("WHATSAPP_SEND_FILE_ROOTS", os.TempDir())
 	cfg := testConfig(t)
 	existing := filepath.Join(t.TempDir(), "f.png")
 	if err := os.WriteFile(existing, tinyPNG, 0o600); err != nil {

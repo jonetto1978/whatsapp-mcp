@@ -50,7 +50,10 @@ func OpenDB(cfg *Config, dbKey string) (*sql.DB, error) {
 	// _busy_timeout must ride in the DSN, not an Exec: it is PER-CONNECTION, and
 	// with a pool the driver has to apply it to every connection it opens. An
 	// Exec would configure exactly one of them and leave the rest at 0.
-	params := fmt.Sprintf("_busy_timeout=%d", dbBusyTimeoutMS)
+	// _foreign_keys=on: two files (history_sync.go, undecryptable.go) reasoned
+	// as if FK enforcement were on for messages.db; until 2026-09-02 it was only
+	// on for session.db, so orphan message rows were silently possible.
+	params := fmt.Sprintf("_busy_timeout=%d&_foreign_keys=on", dbBusyTimeoutMS)
 	dsn := cfg.DBPath + "?" + params
 	if cfg.EncryptDB {
 		// SQLCipher DSN format: pass the key via PRAGMA after connect.
@@ -109,6 +112,12 @@ func OpenDB(cfg *Config, dbKey string) (*sql.DB, error) {
 		return nil, fmt.Errorf("applying migrations: %w", err)
 	}
 
+	// Orphan audit: rows whose chat parent is missing. Enforcement is now on for
+	// NEW writes; pre-existing orphans are reported, not deleted.
+	var orphans int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages m LEFT JOIN chats c ON c.jid = m.chat_jid WHERE c.jid IS NULL`).Scan(&orphans); err == nil && orphans > 0 {
+		log.Printf("db: %d orphan message rows have no chat parent (written before foreign_keys was enforced); list_chats will not show them", orphans)
+	}
 	return db, nil
 }
 
@@ -159,9 +168,17 @@ func applyMigrations(db *sql.DB) error {
 	if rows, err := db.Query(`SELECT version FROM schema_version`); err == nil {
 		for rows.Next() {
 			var v int
-			if scanErr := rows.Scan(&v); scanErr == nil {
-				applied[v] = true
+			if scanErr := rows.Scan(&v); scanErr != nil {
+				rows.Close()
+				return fmt.Errorf("read schema_version: %w", scanErr)
 			}
+			applied[v] = true
+		}
+		if rerr := rows.Err(); rerr != nil {
+			rows.Close()
+			// A partially-read version table must not silently re-run applied
+			// migrations into a duplicate-column wedge (review, 2026-09-02).
+			return fmt.Errorf("iterate schema_version: %w", rerr)
 		}
 		rows.Close()
 	}

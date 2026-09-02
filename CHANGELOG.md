@@ -1,3 +1,27 @@
+## 0.4.0 — 2026-09-02
+
+Security and robustness pass driven by four independent code reviews (see `docs/reviews/`).
+
+- **Bearer-token auth on the HTTP API.** Minted into `store/bridge.token` (0600); required on every
+  route except `/healthcheck`. Before this any local process could read all messages and send as the user.
+- **`send file_path` confined** to `~/Downloads`, `~/Desktop`, `WHATSAPP_MEDIA_DIR` (`WHATSAPP_SEND_FILE_ROOTS`
+  to widen). Previously any absolute path was read and sent.
+- **Six terminal whatsmeow events handled** (`StreamReplaced`, `ClientOutdated`, `TemporaryBan`, `ConnectFailure`,
+  `CATRefreshError`, `StreamError`). They suppress whatsmeow's own reconnect; without handlers the socket died
+  with `connected=true` forever.
+- **`/healthcheck` is honest:** reports `connected`/`authenticated`/`last_sync_unix` and returns 503 `degraded`.
+- **`foreign_keys=on` for `messages.db`** (was only on for `session.db`); orphan rows logged at startup.
+- **Migrations 002–005 are transactional**; `schema_version` read errors fail loudly instead of re-running.
+- **`request_history` walks backwards:** anchors on the oldest message across LID/phone aliases and steps back
+  (`direction`, `walk`, `max_rounds`, clamped). Concurrent walks on one chat → 409; failed sends release the walk;
+  zero-timestamp chunks stop cleanly; repair-mode empty-row check follows aliases.
+- **Scrubber:** matches on the original string (the lower-cased-offset splice corrupted text); O(n) on both
+  layers; the Python layer now also scrubs contact names, group subjects, previews and sender display names.
+- Negative `limit`/`offset` clamped (SQLite treats `LIMIT -1` as unlimited); request-body limits on send and
+  presence routes; `audit.log`/bridge logs/`.env` set to 0600 and actually gitignored; Python client retries
+  across a bridge restart.
+- Python: `direction="older"` was sent as an invalid anchor and 400'd — mapped correctly, with a wire test.
+
 # Changelog
 
 All notable changes to this project will be documented in this file.

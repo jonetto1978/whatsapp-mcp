@@ -351,10 +351,11 @@ func (b *Bridge) RequestChatHistory(ctx context.Context, chatJID string, count i
 // as one conversation. Returns the row's own chat_jid: the history request
 // must name the conversation the anchor message actually belongs to.
 type historyAnchor struct {
-	ID      string
-	TS      int64
-	FromMe  bool
-	ChatJID string
+	ID        string
+	TS        int64
+	FromMe    bool
+	ChatJID   string
+	MaxRounds int // the per-request cap actually applied (after clamping)
 }
 
 func (b *Bridge) OldestAnchor(ctx context.Context, chatJID string) (historyAnchor, error) {
@@ -404,20 +405,40 @@ func (b *Bridge) RequestOlderHistory(ctx context.Context, chatJID string, count 
 	if maxRounds <= 0 {
 		maxRounds = 10
 	}
+	// Hard ceiling: max_rounds also raises the global budget, so an unbounded
+	// value could turn one API call into thousands of WhatsApp requests.
+	if maxRounds > defaultMaxWalkRounds {
+		maxRounds = defaultMaxWalkRounds
+	}
 	a, err := b.OldestAnchor(ctx, chatJID)
 	if err != nil {
 		return a, resp, err
 	}
+	a.MaxRounds = maxRounds
 	// Register the walk BEFORE sending, so the chunk's delivery finds it.
+	registered := false
 	if walk && b.walker != nil {
+		if b.walker.isActive(a.ChatJID) {
+			return a, resp, errWalkActive
+		}
 		b.walker.extendBudget(maxRounds)
 		if !b.walker.beginMode(a.ChatJID, a.TS, count, "older", maxRounds) {
 			return a, resp, errors.New("walk budget exhausted")
 		}
+		registered = true
 	}
 	resp, err = b.RequestHistoryBefore(ctx, a.ChatJID, a.ID, a.TS, a.FromMe, count)
+	if err != nil && registered {
+		// A walk whose first request never left must not stay registered:
+		// a later unsolicited chunk would otherwise resume stepping.
+		b.walker.release(a.ChatJID, "send_failed")
+	}
 	return a, resp, err
 }
+
+// errWalkActive is returned when a backwards walk is already running for the
+// chat; the handler maps it to 409 so the caller does not double-spend.
+var errWalkActive = errors.New("a history walk is already active for this chat; wait for it to stop")
 
 // RequestHistoryBefore asks WhatsApp for the `count` messages immediately
 // before an EXPLICIT anchor, rather than before the newest row we hold.

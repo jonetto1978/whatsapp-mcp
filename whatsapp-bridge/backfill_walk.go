@@ -108,16 +108,50 @@ func newBackfillWalker() *backfillWalker {
 func (w *backfillWalker) reset(budget, maxRounds, perChat int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	dropped := 0
+	for _, st := range w.chats {
+		if st.mode == "older" {
+			dropped++
+		}
+	}
+	if dropped > 0 {
+		log.Printf("backfill walk: reset dropped %d in-flight API history walk(s)", dropped)
+	}
 	w.chats = map[string]*walkState{}
 	w.stopped = map[string]int{}
 	w.spent = 0
+	// Fall back to the defaults rather than keeping whatever an API walk
+	// extended the budget to (review: inflated budget survived into sweeps).
 	if budget > 0 {
 		w.budget = budget
+	} else {
+		w.budget = defaultWalkBudget
 	}
 	if maxRounds > 0 {
 		w.maxRounds = maxRounds
+	} else {
+		w.maxRounds = defaultMaxWalkRounds
 	}
 	_ = perChat
+}
+
+// isActive reports whether a walk is registered for key.
+func (w *backfillWalker) isActive(key string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, ok := w.chats[key]
+	return ok
+}
+
+// release drops a walk without it having reached a brake — used when the
+// request that started it never left the bridge.
+func (w *backfillWalker) release(key, reason string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.chats[key]; ok {
+		delete(w.chats, key)
+		w.stopped[reason]++
+	}
 }
 
 // begin registers the first request for a chat. Returns false when the global
@@ -273,16 +307,21 @@ func (w *backfillWalker) stats() (active, spent, budget int, stopped map[string]
 // fetching" question, and answering it from the store is what keeps the walk
 // from paging through history that has nothing left to repair.
 func (b *Bridge) hasEmptyRowsOlderThan(ctx context.Context, chatJID string, ts int64) (bool, error) {
+	jids, err := resolveAliases(ctx, b.db, chatJID)
+	if err != nil || len(jids) == 0 {
+		jids = []string{chatJID}
+	}
+	args := append(jidsToArgs(jids), ts)
 	var n int
-	err := b.db.QueryRowContext(ctx, `
+	err = b.db.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM messages
-			 WHERE chat_jid = ?
+			 WHERE chat_jid IN (`+inClausePlaceholders(len(jids))+`)
 			   AND timestamp < ?
 			   AND type = 'system'
 			   AND (content_text IS NULL OR content_text = '')
 		)
-	`, chatJID, ts).Scan(&n)
+	`, args...).Scan(&n)
 	return n == 1, err
 }
 
@@ -290,9 +329,12 @@ func (b *Bridge) hasEmptyRowsOlderThan(ctx context.Context, chatJID string, ts i
 // It decides whether to step further back and, if so, issues the next request
 // anchored on that chunk's oldest message.
 func (b *Bridge) continueWalk(ctx context.Context, chatJID string, oldest chunkAnchor) {
-	if b.walker == nil || oldest.ID == "" {
+	if b.walker == nil {
 		return
 	}
+	// Opportunistic stale sweep: walks whose requests were never answered
+	// must not stay pinned until the next repair sweep happens to run.
+	b.walker.sweepStale()
 
 	// The walk may have been registered under an alias of the JID WhatsApp
 	// delivered the chunk under (LID vs phone form). Look it up under every
@@ -307,6 +349,13 @@ func (b *Bridge) continueWalk(ctx context.Context, chatJID string, oldest chunkA
 	}
 	key := b.walker.resolveKey(candidates)
 	if key == "" {
+		return
+	}
+	if oldest.ID == "" {
+		// A chunk with no usable timestamps cannot re-anchor; stop the walk
+		// explicitly instead of leaving it registered forever.
+		d := b.walker.next(key, 0, false)
+		log.Printf("backfill walk: %s stopped (%s: chunk carried no anchor)", chatJID, d.Reason)
 		return
 	}
 

@@ -405,3 +405,13 @@ Session recovery for brief disconnections is automatic; only a hard logout requi
 ## Troubleshooting
 
 See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+## Bridge auth token (since 0.4.0, 2026-09-02)
+
+Every HTTP route except `GET /healthcheck` requires `Authorization: Bearer <token>`. The bridge mints
+the token on first start into `store/bridge.token` (mode 0600, next to the database) and the Python
+MCP server reads the same file automatically. Override the location with `WHATSAPP_BRIDGE_TOKEN_FILE`.
+Delete the file to re-mint. Any other local client must read that file; without it the API answers 401.
+
+`send_message` with `file_path` is confined to `~/Downloads`, `~/Desktop` and `WHATSAPP_MEDIA_DIR`;
+widen with `WHATSAPP_SEND_FILE_ROOTS` (colon-separated).

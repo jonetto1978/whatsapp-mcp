@@ -61,3 +61,12 @@ prospect-api/Negotiator Playbook *.md
 prospect-api/named-tunnel-cutover.sh
 # Generated MCP bundle (uploaded to GitHub Releases, not tracked in git)
 *.mcpb
+
+# bridge logs and audit (actual filenames; the old bridge-stdout/stderr patterns never matched)
+bridge.out.log
+bridge.err.log
+bridge.err.log.*.gz
+audit.log
+mcp-server.log
+whatsapp-bridge/mcp-server.log
+store/bridge.token

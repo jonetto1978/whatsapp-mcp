@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -24,14 +25,21 @@ type Server struct {
 	backfiller *TranscriptBackfiller
 	mux        *http.ServeMux
 	server     *http.Server
+	token      string // bearer token every route except /healthcheck must present
 }
 
 func NewServer(cfg *Config, db *sql.DB, bridge *Bridge, backfiller *TranscriptBackfiller) *Server {
 	s := &Server{cfg: cfg, db: db, bridge: bridge, backfiller: backfiller, mux: http.NewServeMux()}
+	tok, tokPath, err := loadOrMintBridgeToken(cfg)
+	if err != nil {
+		log.Fatalf("bridge token: %v", err)
+	}
+	s.token = tok
+	log.Printf("bridge auth: bearer token required on every route except /healthcheck (token file: %s)", tokPath)
 	s.registerRoutes()
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.BridgeHost, cfg.BridgePort),
-		Handler:           newOriginGuard(s.mux, cfg.AllowedOrigins),
+		Handler:           newOriginGuard(newTokenGuard(s.mux, s.token), cfg.AllowedOrigins),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -142,7 +150,11 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 
 	a, resp, err := s.bridge.RequestOlderHistory(ctx, body.ChatJID, body.Count, walk, body.MaxRounds)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "history request failed", Details: err.Error()})
+		code := http.StatusInternalServerError
+		if errors.Is(err, errWalkActive) {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, errorResponse{Error: "history request failed", Details: err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -153,7 +165,7 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 		"anchor_chat_jid": a.ChatJID,
 		"requested_count": body.Count,
 		"walk":            walk,
-		"max_rounds":      body.MaxRounds,
+		"max_rounds":      a.MaxRounds,
 		"sent_message_id": resp.ID,
 		"sent_at_unix":    resp.Timestamp.Unix(),
 		"hint":            "Anchored on the OLDEST local message; WhatsApp delivers the window before it asynchronously. With walk=true each delivered chunk re-anchors on its own oldest message and requests again, until max_rounds, the global budget, or no progress. Poll list_messages(chat_jid, before=<previous oldest id>) — the oldest id moves back as chunks land. Watch the bridge log for 'backfill walk: … stepping back' / 'stopped (…)'.",
@@ -208,6 +220,12 @@ type healthcheckResponse struct {
 	Timestamp     int64          `json:"timestamp"`
 	Transcription map[string]any `json:"transcription,omitempty"`
 	AliasCoverage AliasCoverage  `json:"alias_coverage"`
+	// Connectivity — the fields a monitor actually needs. Before 2026-09-02 the
+	// endpoint said "ok" unconditionally, even with a dead socket.
+	Connected      bool   `json:"connected"`
+	Authenticated  bool   `json:"authenticated"`
+	LastSyncUnix   int64  `json:"last_sync_unix"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 	// MYC-3284 — what the bridge could not read, made measurable.
 	UndecodedTotal    int            `json:"undecoded_total"`
 	UndecodedByType   map[string]int `json:"undecoded_by_type"`
@@ -337,8 +355,18 @@ func (s *Server) handleHealthcheck(w http.ResponseWriter, r *http.Request) {
 
 	st := s.undecodedStats(r.Context())
 
-	writeJSON(w, http.StatusOK, healthcheckResponse{
-		Status:              "ok",
+	connected, authed, _, lastSync := s.bridge.Status()
+	code, status, reason := http.StatusOK, "ok", ""
+	if !connected || !authed {
+		code, status = http.StatusServiceUnavailable, "degraded"
+		reason = fmt.Sprintf("connected=%v authenticated=%v", connected, authed)
+	}
+	writeJSON(w, code, healthcheckResponse{
+		Status:              status,
+		Connected:           connected,
+		Authenticated:       authed,
+		LastSyncUnix:        lastSync,
+		DegradedReason:      reason,
 		JournalMode:         JournalMode(s.db),
 		Version:             bridgeVersion,
 		DBEncrypted:         s.cfg.EncryptDB,
@@ -509,11 +537,14 @@ type chatListResponse struct {
 
 func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	limit := parseIntDefault(q.Get("limit"), 20)
+	limit := atoiDefaultPositive(q.Get("limit"), 20)
 	if limit > 200 {
 		limit = 200
 	}
 	offset := parseIntDefault(q.Get("offset"), 0)
+	if offset < 0 {
+		offset = 0
+	}
 	unreadOnly := q.Get("unread_only") == "true"
 
 	sqlStr := `SELECT jid, chat_type, COALESCE(name, ''), COALESCE(last_message_time, 0), COALESCE(last_message_preview, ''), unread_count
@@ -573,7 +604,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "chat_jid required"})
 		return
 	}
-	limit := parseIntDefault(q.Get("limit"), 20)
+	limit := atoiDefaultPositive(q.Get("limit"), 20)
 	if limit > 500 {
 		limit = 500
 	}
@@ -692,7 +723,7 @@ type contactListResponse struct {
 func (s *Server) handleSearchContacts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := q.Get("q")
-	limit := parseIntDefault(q.Get("limit"), 10)
+	limit := atoiDefaultPositive(q.Get("limit"), 10)
 	if limit > 100 {
 		limit = 100
 	}

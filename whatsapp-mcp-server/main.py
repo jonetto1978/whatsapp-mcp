@@ -23,6 +23,8 @@ Enhancement layers (applied transparently to core tools):
 from __future__ import annotations
 
 import json
+import asyncio
+import re
 import logging
 import os
 import sys
@@ -88,9 +90,19 @@ _http: httpx.AsyncClient | None = None
 async def lifespan(_app: FastMCP):
     """Set up and tear down the shared HTTP client."""
     global _http
+    headers = {}
+    token = _bridge_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        log.warning("no bridge token found at %s — the bridge will answer 401 until it exists", _bridge_token_path())
     _http = httpx.AsyncClient(
         base_url=BRIDGE_BASE,
         timeout=httpx.Timeout(30.0, connect=5.0),
+        headers=headers,
+        # A launchd restart of the bridge takes ~30 s; retry connects instead
+        # of telling the user to start it by hand (review finding, 2026-09-02).
+        transport=httpx.AsyncHTTPTransport(retries=3),
     )
     try:
         # Preflight: confirm the Go bridge is reachable.
@@ -113,6 +125,32 @@ mcp = FastMCP("whatsapp-mcp", lifespan=lifespan)
 # --- Audit ------------------------------------------------------------------
 
 
+def _bridge_token_path() -> str:
+    return os.path.expanduser(
+        os.getenv("WHATSAPP_BRIDGE_TOKEN_FILE", "~/.claude/whatsapp-mcp/store/bridge.token")
+    )
+
+
+def _bridge_token() -> str | None:
+    """The bearer token the bridge mints into store/bridge.token (0600).
+    Every route except /healthcheck requires it since 2026-09-02."""
+    try:
+        with open(_bridge_token_path(), encoding="utf-8") as f:
+            t = f.read().strip()
+        return t or None
+    except OSError:
+        return None
+
+
+async def _connect_retry(call):
+    """One bounded retry across a bridge restart window."""
+    try:
+        return await call()
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        await asyncio.sleep(2.0)
+        return await call()
+
+
 def _audit(tool: str, params: dict[str, Any], result_summary: str, duration_ms: int, error: str | None = None) -> None:
     """Append a structured audit record. Redacts nothing at this layer; the bridge is expected to redact media blobs upstream."""
     if not AUDIT_LOG_ENABLED:
@@ -127,8 +165,14 @@ def _audit(tool: str, params: dict[str, Any], result_summary: str, duration_ms: 
             "duration_ms": duration_ms,
             "error": error,
         }
-        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+        # 0600: the log indexes every JID and query the user ever touched.
+        fd = os.open(AUDIT_LOG_PATH, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            os.chmod(AUDIT_LOG_PATH, 0o600)
+        except OSError:
+            pass
     except Exception as e:  # noqa: BLE001
         log.warning("audit log write failed: %s", e)
 
@@ -173,21 +217,48 @@ def scrub(text: str | None) -> tuple[str | None, list[str]]:
     """
     if not text or not SCRUB_PROMPT_INJECTION:
         return text, []
-    lowered = text.lower()
     flags: list[str] = []
     out = text
-    for pat in _INJECTION_PATTERNS:
-        if pat in lowered:
+    # One case-insensitive regex pass per pattern on the ORIGINAL string.
+    # The previous loop re-lowered the whole string on every replacement
+    # (quadratic: 9.000 hits in 63 KB took ~390 ms, inside the event loop).
+    for pat, rx in _injection_regexps():
+        if rx.search(out):
             flags.append(pat)
-            # Case-insensitive replace preserving length roughly.
-            idx = 0
-            while idx < len(out):
-                lo = out.lower().find(pat, idx)
-                if lo < 0:
-                    break
-                out = out[:lo] + "[REDACTED_INJECTION]" + out[lo + len(pat) :]
-                idx = lo + len("[REDACTED_INJECTION]")
+            out = rx.sub("[REDACTED_INJECTION]", out)
     return out, flags
+
+
+_INJECTION_RX: list[tuple[str, "re.Pattern[str]"]] | None = None
+
+
+def _injection_regexps() -> list[tuple[str, "re.Pattern[str]"]]:
+    global _INJECTION_RX
+    if _INJECTION_RX is None:
+        _INJECTION_RX = [(p, re.compile(re.escape(p), re.IGNORECASE)) for p in _INJECTION_PATTERNS]
+    return _INJECTION_RX
+
+
+_SCRUB_FIELDS = ("name", "last_message_preview", "sender_display", "push_name", "full_name", "verified_name")
+
+
+def _scrub_fields(items: list[dict[str, Any]], keys: tuple[str, ...] = _SCRUB_FIELDS) -> None:
+    """Scrub free-text fields other than message bodies in place. Contact
+    names, group subjects and chat previews reach Claude verbatim otherwise
+    (review finding, 2026-09-02)."""
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        hit: list[str] = []
+        for k in keys:
+            v = it.get(k)
+            if isinstance(v, str) and v:
+                sv, fl = scrub(v)
+                if fl:
+                    it[k] = sv
+                    hit.extend(fl)
+        if hit:
+            it["_scrub_flags"] = sorted(set(it.get("_scrub_flags", []) + hit))
 
 
 # --- Vault CRM auto-injection -----------------------------------------------
@@ -347,9 +418,10 @@ def _transport_error(e: httpx.TransportError) -> RuntimeError:
 
 
 async def _bridge_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    assert _http is not None, "http client not initialized"
+    if _http is None:
+        raise RuntimeError("http client not initialized")
     try:
-        r = await _http.get(path, params=params)
+        r = await _connect_retry(lambda: _http.get(path, params=params))
     except httpx.TransportError as e:
         raise _transport_error(e) from e
     try:
@@ -360,9 +432,10 @@ async def _bridge_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
 
 async def _bridge_post(path: str, body: dict[str, Any]) -> Any:
-    assert _http is not None, "http client not initialized"
+    if _http is None:
+        raise RuntimeError("http client not initialized")
     try:
-        r = await _http.post(path, json=body)
+        r = await _connect_retry(lambda: _http.post(path, json=body))
     except httpx.TransportError as e:
         raise _transport_error(e) from e
     try:
@@ -405,9 +478,10 @@ async def list_chats(limit: int = 20, offset: int = 0, unread_only: bool = False
         unread_only: If true, return only chats with unread messages.
     """
     start = time.time()
-    params = {"limit": min(limit, 200), "offset": offset, "unread_only": str(unread_only).lower()}
+    params = {"limit": max(1, min(limit, 200)), "offset": max(0, offset), "unread_only": str(unread_only).lower()}
     try:
         result = await _bridge_get("/api/chats", params)
+        _scrub_fields(result.get("chats", []))
         _audit("list_chats", params, f"{len(result.get('chats', []))} chats", int((time.time() - start) * 1000))
         return result
     except Exception as e:  # noqa: BLE001
@@ -421,9 +495,10 @@ async def search_contacts(query: str, limit: int = 10) -> dict[str, Any]:
     "Muñoz" matches "munoz", "José" matches "jose", "Zürich" matches "zurich".
     """
     start = time.time()
-    params = {"q": query, "limit": limit}
+    params = {"q": query, "limit": max(1, min(limit, 200))}
     try:
         result = await _bridge_get("/api/contacts/search", params)
+        _scrub_fields(result.get("contacts", []))
         _audit("search_contacts", params, f"{len(result.get('contacts', []))} matches", int((time.time() - start) * 1000))
         return result
     except Exception as e:  # noqa: BLE001
@@ -468,6 +543,7 @@ async def search_groups(query: str, limit: int = 10) -> dict[str, Any]:
             }
             for g in matches[: max(limit, 0)]
         ]
+        _scrub_fields(trimmed, ("name",))
         _audit("search_groups", params, f"{len(trimmed)} matches", int((time.time() - start) * 1000))
         return {"groups": trimmed, "count": len(trimmed), "total_joined": len(groups)}
     except Exception as e:  # noqa: BLE001
@@ -491,7 +567,7 @@ async def list_messages(
         include_crm_context: When true and WHATSAPP_VAULT_CRM_PATH is set, the response includes a `crm_context` block with the matching vault CRM note summary.
     """
     start = time.time()
-    params: dict[str, Any] = {"chat_jid": chat_jid, "limit": min(limit, 500)}
+    params: dict[str, Any] = {"chat_jid": chat_jid, "limit": max(1, min(limit, 500))}
     if before:
         params["before"] = before
     try:
@@ -504,6 +580,7 @@ async def list_messages(
             msg["content_text"] = scrubbed
             if flags:
                 msg["_scrub_flags"] = flags
+        _scrub_fields(result.get("messages", []), ("sender_display",))
 
         # CRM injection.
         if include_crm_context and result.get("chat"):
@@ -582,10 +659,19 @@ async def request_history(
         count: Messages per window (bridge caps at 200).
         direction: "older" (go back in time) or "newest" (re-fetch held window).
         walk: Keep stepping backwards automatically (older only).
-        max_rounds: Cap on windows for this walk.
+        max_rounds: Cap on windows for this walk (clamped to 1..20).
     """
+    # The bridge's wire vocabulary is anchor="oldest"|"newest"; the tool speaks
+    # direction="older"|"newest". Map explicitly — a bare pass-through sent
+    # anchor="older", which the bridge rejects with 400 (review finding, 2026-09-02).
+    anchor = {"older": "oldest", "oldest": "oldest", "newest": "newest"}.get(direction)
+    if anchor is None:
+        raise ValueError('direction must be "older" or "newest"')
+    # max_rounds also raises the bridge's global walk budget; keep it bounded here
+    # so a caller cannot turn one tool call into thousands of WhatsApp requests.
+    max_rounds = max(1, min(int(max_rounds), 20))
     start = time.time()
-    body = {"chat_jid": chat_jid, "count": count, "anchor": direction,
+    body = {"chat_jid": chat_jid, "count": count, "anchor": anchor,
             "walk": walk, "max_rounds": max_rounds}
     try:
         result = await _bridge_post("/api/admin/request-history", body)

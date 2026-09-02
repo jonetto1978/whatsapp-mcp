@@ -1,3 +1,6 @@
+-- Wrapped in a transaction 2026-09-02: a partial failure left autocommitted
+-- ALTERs behind and boot-looped on "duplicate column" (review finding).
+BEGIN;
 -- 002: voice/audio media-key columns + index for transcript backfill.
 -- Background: voice notes used to enqueue transcription via an in-memory
 -- closure capturing the live whatsmeow message. If the worker failed
@@ -24,3 +27,4 @@ CREATE INDEX IF NOT EXISTS idx_messages_voice_pending
 
 INSERT OR IGNORE INTO schema_version (version, applied_at, description)
 VALUES (2, strftime('%s', 'now'), 'Audio media-key columns + sweeper index for transcript backfill');
+COMMIT;

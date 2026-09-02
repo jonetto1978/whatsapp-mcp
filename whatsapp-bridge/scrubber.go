@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"strings"
+	"regexp"
 )
 
 // InjectionPatterns are phrases commonly used in prompt-injection attacks.
@@ -33,27 +33,32 @@ var InjectionPatterns = []string{
 // Scrub replaces every known injection pattern with "[REDACTED_INJECTION]" and returns
 // both the scrubbed string and a list of matched pattern tags (for audit).
 // If no patterns match, returns (input, nil).
+var injectionRegexps = func() []*regexp.Regexp {
+	out := make([]*regexp.Regexp, len(InjectionPatterns))
+	for i, p := range InjectionPatterns {
+		out[i] = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(p))
+	}
+	return out
+}()
+
 func Scrub(s string) (string, []string) {
 	if s == "" {
 		return s, nil
 	}
-	lower := strings.ToLower(s)
 	flags := make([]string, 0)
 	out := s
-	for _, pat := range InjectionPatterns {
-		if !strings.Contains(lower, pat) {
+	// Match case-insensitively on the ORIGINAL string. The previous version
+	// took byte offsets from a lower-cased copy, whose length differs for
+	// runes like U+212A / U+0130, and spliced them into the original —
+	// corrupting neighbouring text and leaving partial payload behind
+	// (review finding, 2026-09-02). It also rescanned the whole string per
+	// replacement (quadratic); ReplaceAll is a single pass per pattern.
+	for i, re := range injectionRegexps {
+		if !re.MatchString(out) {
 			continue
 		}
-		flags = append(flags, pat)
-		// Walk through the lower-cased representation, finding match positions,
-		// then replace at those positions in the original string.
-		for {
-			idx := strings.Index(strings.ToLower(out), pat)
-			if idx < 0 {
-				break
-			}
-			out = out[:idx] + "[REDACTED_INJECTION]" + out[idx+len(pat):]
-		}
+		flags = append(flags, InjectionPatterns[i])
+		out = re.ReplaceAllLiteralString(out, "[REDACTED_INJECTION]")
 	}
 	if len(flags) == 0 {
 		return s, nil

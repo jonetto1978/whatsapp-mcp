@@ -1,3 +1,6 @@
+-- Wrapped in a transaction 2026-09-02: a partial failure left autocommitted
+-- ALTERs behind and boot-looped on "duplicate column" (review finding).
+BEGIN;
 -- 005: contacts.full_name — the name from the USER's address book.
 --
 -- Background: contacts.push_name is what a contact set for THEMSELVES. It is
@@ -39,3 +42,4 @@ CREATE INDEX IF NOT EXISTS idx_contacts_normalized_full_name ON contacts(normali
 
 INSERT OR IGNORE INTO schema_version (version, applied_at, description)
 VALUES (5, strftime('%s', 'now'), 'contacts.full_name: address-book name from whatsmeow ContactStore');
+COMMIT;

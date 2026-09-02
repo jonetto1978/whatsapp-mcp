@@ -126,7 +126,10 @@ func materializeOutboundFile(ctx context.Context, cfg *Config, draftID string, r
 		return outboundFile{}, fmt.Errorf("pass exactly one of file_path, file_base64 or file_url")
 
 	case req.FilePath != "":
-		clean := filepath.Clean(req.FilePath)
+		clean, err := confineToSendRoots(req.FilePath)
+		if err != nil {
+			return outboundFile{}, err
+		}
 		info, err := os.Stat(clean)
 		if err != nil {
 			return outboundFile{}, fmt.Errorf("file_path %q: %w", req.FilePath, err)
@@ -404,4 +407,46 @@ func removeOutboundFile(path string) error {
 		return err
 	}
 	return nil
+}
+
+// confineToSendRoots resolves file_path (symlinks included) and requires it to
+// sit under an allowed root. Before 2026-09-02 any absolute path was read and
+// sent — chained with the unauthenticated API that was a one-line exfiltration
+// of ~/.ssh or the message database itself (review finding).
+// Roots: WHATSAPP_SEND_FILE_ROOTS (colon-separated), default ~/Downloads and
+// ~/Desktop plus WHATSAPP_MEDIA_DIR when set.
+func confineToSendRoots(p string) (string, error) {
+	abs, err := filepath.Abs(filepath.Clean(p))
+	if err != nil {
+		return "", fmt.Errorf("file_path %q: %w", p, err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("file_path %q: %w", p, err)
+	}
+	for _, root := range sendFileRoots() {
+		if root == "" {
+			continue
+		}
+		r, rerr := filepath.EvalSymlinks(root)
+		if rerr != nil {
+			continue
+		}
+		if resolved == r || strings.HasPrefix(resolved, r+string(os.PathSeparator)) {
+			return resolved, nil
+		}
+	}
+	return "", fmt.Errorf("file_path %q is outside the allowed send roots (set WHATSAPP_SEND_FILE_ROOTS to widen)", p)
+}
+
+func sendFileRoots() []string {
+	if v := os.Getenv("WHATSAPP_SEND_FILE_ROOTS"); v != "" {
+		return strings.Split(v, ":")
+	}
+	home, _ := os.UserHomeDir()
+	roots := []string{filepath.Join(home, "Downloads"), filepath.Join(home, "Desktop")}
+	if m := os.Getenv("WHATSAPP_MEDIA_DIR"); m != "" {
+		roots = append(roots, m)
+	}
+	return roots
 }

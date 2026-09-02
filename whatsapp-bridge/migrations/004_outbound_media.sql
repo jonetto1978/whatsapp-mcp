@@ -1,3 +1,6 @@
+-- Wrapped in a transaction 2026-09-02: a partial failure left autocommitted
+-- ALTERs behind and boot-looped on "duplicate column" (review finding).
+BEGIN;
 -- 004: outbound media draft options.
 --
 -- Background: the `sends` table has allowed send_type 'file' and 'audio'
@@ -30,3 +33,4 @@ ALTER TABLE sends ADD COLUMN media_voice_note INTEGER NOT NULL DEFAULT 0;
 
 INSERT OR IGNORE INTO schema_version (version, applied_at, description)
 VALUES (4, strftime('%s', 'now'), 'sends: outbound media draft options (as_document, voice_note, filename)');
+COMMIT;

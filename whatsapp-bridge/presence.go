@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"time"
 
@@ -25,7 +26,7 @@ type markReadRequest struct {
 
 func (s *Server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 	var req markReadRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON", Details: err.Error()})
 		return
 	}
@@ -64,7 +65,7 @@ type typingRequest struct {
 
 func (s *Server) handleTyping(w http.ResponseWriter, r *http.Request) {
 	var req typingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON", Details: err.Error()})
 		return
 	}
@@ -108,7 +109,7 @@ type onlineRequest struct {
 
 func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	var req onlineRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<14)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Error: "invalid JSON", Details: err.Error()})
 		return
 	}
