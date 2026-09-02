@@ -5,10 +5,12 @@ MCP tools to Claude. FastMCP + stdio transport.
 
 Tool categories (see SECURITY.md for risk-tier classification):
 
-- Read-only: search_contacts, list_messages, list_chats, get_chat, etc.
+- Read-only: healthcheck, list_chats, search_contacts, search_groups, list_messages, download_media.
+- Read, generates WhatsApp traffic: request_history.
 - Presence: mark_chat_read, send_typing_indicator, set_online_presence.
-- Draft (pre-send): send_message, send_file, send_audio_message, send_reply_quote, send_reaction.
+- Draft (pre-send): send_message, send_reply_quote, send_reaction.
 - Confirm: confirm_send (commits a previously-drafted send).
+(14 tools — regenerate this list from @mcp.tool when it changes.)
 
 Enhancement layers (applied transparently to core tools):
 
@@ -22,11 +24,11 @@ Enhancement layers (applied transparently to core tools):
 
 from __future__ import annotations
 
-import json
 import asyncio
-import re
+import json
 import logging
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -71,7 +73,7 @@ AUDIT_LOG_PATH = os.environ.get(
 if hasattr(sys.stderr, "reconfigure"):
     try:
         sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:  # noqa: BLE001 — logging setup must never block startup
+    except Exception:  # noqa: BLE001, S110 — logging is not configured yet; nothing can record this
         pass
 
 logging.basicConfig(
@@ -229,10 +231,10 @@ def scrub(text: str | None) -> tuple[str | None, list[str]]:
     return out, flags
 
 
-_INJECTION_RX: list[tuple[str, "re.Pattern[str]"]] | None = None
+_INJECTION_RX: list[tuple[str, re.Pattern[str]]] | None = None
 
 
-def _injection_regexps() -> list[tuple[str, "re.Pattern[str]"]]:
+def _injection_regexps() -> list[tuple[str, re.Pattern[str]]]:
     global _INJECTION_RX
     if _INJECTION_RX is None:
         _INJECTION_RX = [(p, re.compile(re.escape(p), re.IGNORECASE)) for p in _INJECTION_PATTERNS]
@@ -303,7 +305,8 @@ def lookup_crm_context(phone: str | None, display_name: str | None) -> CRMContex
     for md in root.rglob("*.md"):
         try:
             post = frontmatter.load(str(md))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log.debug("crm: skipping unreadable %s: %s", md, exc)
             continue
 
         fm_phone = _normalize_phone(str(post.metadata.get("phone", "")))
@@ -431,11 +434,14 @@ async def _bridge_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return r.json()
 
 
-async def _bridge_post(path: str, body: dict[str, Any]) -> Any:
+async def _bridge_post(path: str, body: dict[str, Any], timeout: float | None = None) -> Any:
     if _http is None:
         raise RuntimeError("http client not initialized")
     try:
-        r = await _connect_retry(lambda: _http.post(path, json=body))
+        kw: dict[str, Any] = {"json": body}
+        if timeout is not None:
+            kw["timeout"] = httpx.Timeout(timeout, connect=5.0)
+        r = await _connect_retry(lambda: _http.post(path, **kw))
     except httpx.TransportError as e:
         raise _transport_error(e) from e
     try:
@@ -458,12 +464,26 @@ async def healthcheck() -> dict[str, Any]:
     """
     start = time.time()
     try:
-        result = await _bridge_get("/healthcheck")
-        status = await _bridge_get("/api/status")
+        # /healthcheck answers 503 "degraded" when the bridge is not connected
+        # or not paired (since 0.4.0). That is exactly when the caller needs
+        # status_detail most, so do not let the 503 raise — return it.
+        if _http is None:
+            raise RuntimeError("http client not initialized")
+        r = await _connect_retry(lambda: _http.get("/healthcheck"))
+        try:
+            result = r.json()
+        except ValueError:
+            result = {"status": "unparseable", "http_status": r.status_code}
+        result["http_status"] = r.status_code
+        result["degraded"] = r.status_code != 200
+        try:
+            status = await _bridge_get("/api/status")
+        except Exception as se:  # noqa: BLE001 — a partial answer beats no answer
+            status = {"error": str(se)}
         merged = {**result, "status_detail": status}
-        _audit("healthcheck", {}, "ok", int((time.time() - start) * 1000))
+        _audit("healthcheck", {}, "ok" if not result["degraded"] else f"degraded http {r.status_code}", int((time.time() - start) * 1000))
         return merged
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("healthcheck", {}, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -484,7 +504,7 @@ async def list_chats(limit: int = 20, offset: int = 0, unread_only: bool = False
         _scrub_fields(result.get("chats", []))
         _audit("list_chats", params, f"{len(result.get('chats', []))} chats", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("list_chats", params, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -495,13 +515,13 @@ async def search_contacts(query: str, limit: int = 10) -> dict[str, Any]:
     "Muñoz" matches "munoz", "José" matches "jose", "Zürich" matches "zurich".
     """
     start = time.time()
-    params = {"q": query, "limit": max(1, min(limit, 200))}
+    params = {"q": query, "limit": max(1, min(limit, 100))}  # bridge caps at 100
     try:
         result = await _bridge_get("/api/contacts/search", params)
         _scrub_fields(result.get("contacts", []))
         _audit("search_contacts", params, f"{len(result.get('contacts', []))} matches", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("search_contacts", params, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -546,7 +566,7 @@ async def search_groups(query: str, limit: int = 10) -> dict[str, Any]:
         _scrub_fields(trimmed, ("name",))
         _audit("search_groups", params, f"{len(trimmed)} matches", int((time.time() - start) * 1000))
         return {"groups": trimmed, "count": len(trimmed), "total_joined": len(groups)}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("search_groups", params, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -600,7 +620,7 @@ async def list_messages(
 
         _audit("list_messages", params, f"{len(result.get('messages', []))} messages", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("list_messages", params, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -620,11 +640,13 @@ async def download_media(message_id: str) -> dict[str, Any]:
     start = time.time()
     body = {"message_id": message_id}
     try:
-        result = await _bridge_post("/api/media/download", body)
+        # The bridge gives itself 60 s for a media fetch; outlast it so a slow
+        # download is reported as slow, not as a wedged bridge.
+        result = await _bridge_post("/api/media/download", body, timeout=90.0)
         _audit("download_media", body, f"{result.get('size', 0)} bytes -> {result.get('path')}",
                int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("download_media", body, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -661,31 +683,37 @@ async def request_history(
         walk: Keep stepping backwards automatically (older only).
         max_rounds: Cap on windows for this walk (clamped to 1..20).
     """
-    # The bridge's wire vocabulary is anchor="oldest"|"newest"; the tool speaks
-    # direction="older"|"newest". Map explicitly — a bare pass-through sent
-    # anchor="older", which the bridge rejects with 400 (review finding, 2026-09-02).
-    anchor = {"older": "oldest", "oldest": "oldest", "newest": "newest"}.get(direction)
-    if anchor is None:
-        raise ValueError('direction must be "older" or "newest"')
-    # max_rounds also raises the bridge's global walk budget; keep it bounded here
-    # so a caller cannot turn one tool call into thousands of WhatsApp requests.
-    max_rounds = max(1, min(int(max_rounds), 20))
     start = time.time()
-    body = {"chat_jid": chat_jid, "count": count, "anchor": anchor,
-            "walk": walk, "max_rounds": max_rounds}
+    body: dict[str, Any] = {"chat_jid": chat_jid, "direction": direction, "count": count,
+                            "walk": walk, "max_rounds": max_rounds}
     try:
+        # The bridge's wire vocabulary is anchor="oldest"|"newest"; the tool speaks
+        # direction="older"|"newest". Map explicitly — a bare pass-through sent
+        # anchor="older", which the bridge rejects with 400 (review finding, 2026-09-02).
+        # Validation lives inside the try so a rejected call is still audited.
+        anchor = {"older": "oldest", "oldest": "oldest", "newest": "newest"}.get(direction)
+        if anchor is None:
+            raise ValueError('direction must be "older" or "newest"')
+        # Both caps mirror the bridge (count ≤ 200 per window; max_rounds also
+        # raises the bridge's global walk budget, so it stays small here too).
+        count = max(1, min(int(count), 200))
+        max_rounds = max(1, min(int(max_rounds), 20))
+        body = {"chat_jid": chat_jid, "count": count, "anchor": anchor,
+                "walk": walk, "max_rounds": max_rounds}
         result = await _bridge_post("/api/admin/request-history", body)
-        result["hint"] = (
+        # The bridge's hint is mode-specific (newest = media-key re-fetch, no
+        # paging back); only fill in a generic one when it sent none.
+        result.setdefault("hint", (
             "Delivered asynchronously, usually within a few seconds. Call "
             "list_messages(chat_jid, before=<previous oldest message id>) "
             "once landed \u2014 there is no separate completion signal. Media in "
             "the new messages is metadata-only until download_media is "
             "called per message."
-        )
+        ))
         _audit("request_history", body, f"requested {count} for {chat_jid}",
                int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("request_history", body, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -715,7 +743,7 @@ async def send_message(recipient_jid: str, text: str) -> dict[str, Any]:
                f"draft_id={result.get('draft_id')} recipient={result.get('recipient_display')}",
                int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("send_message", {"recipient_jid": recipient_jid, "text_len": len(text)},
                "failed", int((time.time() - start) * 1000), error=str(e))
         raise
@@ -737,7 +765,9 @@ async def confirm_send(draft_id: str) -> dict[str, Any]:
         404: draft not found
         409: draft already confirmed/sent/failed (each draft can only be confirmed once)
         410: draft expired (>1 hour since creation)
-        502: send failed at whatsmeow layer (bridge disconnected, invalid recipient, etc.)
+        400: invalid recipient JID
+        503: bridge not connected to WhatsApp (retry once it reconnects)
+        502: send failed at the whatsmeow layer after the bridge tried
     """
     start = time.time()
     try:
@@ -746,7 +776,7 @@ async def confirm_send(draft_id: str) -> dict[str, Any]:
                f"status={result.get('status')} whatsapp_id={result.get('whatsapp_message_id')}",
                int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("confirm_send", {"draft_id": draft_id}, "failed", int((time.time() - start) * 1000), error=str(e))
         raise
 
@@ -778,7 +808,7 @@ async def send_reply_quote(recipient_jid: str, quoted_message_id: str, text: str
                {"recipient_jid": recipient_jid, "quoted": quoted_message_id, "text_len": len(text)},
                f"draft_id={result.get('draft_id')}", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("send_reply_quote", {"recipient_jid": recipient_jid, "quoted": quoted_message_id},
                "failed", int((time.time() - start) * 1000), error=str(e))
         raise
@@ -791,7 +821,9 @@ async def send_reaction(recipient_jid: str, target_message_id: str, emoji: str) 
     Args:
         recipient_jid: The chat JID where the target message lives.
         target_message_id: The ID of the message to react to. Find via list_messages.
-        emoji: The reaction emoji (e.g., "❤️", "👍", "😂"). Pass "" to remove a previous reaction.
+        emoji: The reaction emoji (e.g., "❤️", "👍", "😂"). Must be non-empty —
+            the bridge rejects an empty emoji, so removing a reaction is not
+            supported through this tool yet.
 
     Returns a draft_id. Call confirm_send(draft_id) to actually react.
     """
@@ -808,7 +840,7 @@ async def send_reaction(recipient_jid: str, target_message_id: str, emoji: str) 
                {"recipient_jid": recipient_jid, "target": target_message_id, "emoji": emoji},
                f"draft_id={result.get('draft_id')}", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("send_reaction", {"recipient_jid": recipient_jid, "target": target_message_id},
                "failed", int((time.time() - start) * 1000), error=str(e))
         raise
@@ -832,7 +864,7 @@ async def mark_chat_read(chat_jid: str, message_ids: list[str]) -> dict[str, Any
         _audit("mark_chat_read", {"chat_jid": chat_jid, "count": len(message_ids)},
                "ok", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("mark_chat_read", {"chat_jid": chat_jid}, "failed",
                int((time.time() - start) * 1000), error=str(e))
         raise
@@ -856,7 +888,7 @@ async def send_typing_indicator(chat_jid: str, state: str = "composing") -> dict
         _audit("send_typing_indicator", {"chat_jid": chat_jid, "state": state},
                "ok", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("send_typing_indicator", {"chat_jid": chat_jid}, "failed",
                int((time.time() - start) * 1000), error=str(e))
         raise
@@ -876,7 +908,7 @@ async def set_online_presence(online: bool = True) -> dict[str, Any]:
         result = await _bridge_post("/api/presence/online", body)
         _audit("set_online_presence", {"online": online}, "ok", int((time.time() - start) * 1000))
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         _audit("set_online_presence", {"online": online}, "failed",
                int((time.time() - start) * 1000), error=str(e))
         raise

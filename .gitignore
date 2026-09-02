@@ -70,3 +70,6 @@ audit.log
 mcp-server.log
 whatsapp-bridge/mcp-server.log
 store/bridge.token
+
+# machine-local search index (regenerated)
+.memsearch/

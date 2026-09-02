@@ -48,6 +48,11 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 )
 
+// maxInboundMediaBytes caps what DownloadMedia will hold in memory and write
+// under MediaPath. 256 MiB is far above any voice note, image or fund PDF
+// this bridge exists to fetch, and far below what would hurt the host.
+const maxInboundMediaBytes = 256 << 20
+
 // mediaFields holds the persisted columns the bridge needs to re-download
 // any media-bearing message via whatsmeow.Client.Download.
 type mediaFields struct {
@@ -170,10 +175,16 @@ func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mim
 		mt = mediaMime.String
 	}
 
-	// Idempotent fast-path: already downloaded and file still exists.
+	// Idempotent fast-path: already downloaded and file still exists — but only
+	// if the stored path is still inside the media folder. A polluted or legacy
+	// messages.media_path must not turn download_media into "return any file
+	// on disk" (Codex review, 2026-09-02; hypothesis, closed anyway).
 	if mediaPath.Valid && mediaPath.String != "" {
 		if st, statErr := os.Stat(mediaPath.String); statErr == nil && !st.IsDir() {
-			return mediaPath.String, mt, st.Size(), nil
+			if insideMediaDir(b.cfg.MediaPath, mediaPath.String) {
+				return mediaPath.String, mt, st.Size(), nil
+			}
+			log.Printf("DownloadMedia: ignoring stored media_path outside the media folder for %s; re-downloading", messageID)
 		}
 	}
 
@@ -187,9 +198,20 @@ func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mim
 		return "", "", 0, err
 	}
 
+	// Bridge-side ceiling on inbound media. whatsmeow buffers the whole blob in
+	// memory and we write it to disk unchecked; a malformed row or an
+	// unexpected response must not turn into a multi-GB allocation
+	// (Codex review, 2026-09-02). The row's own declared length is checked
+	// first so an oversized item is refused without a network round-trip.
+	if fileLength.Valid && fileLength.Int64 > maxInboundMediaBytes {
+		return "", "", 0, fmt.Errorf("media for %s declares %d bytes; bridge cap is %d", messageID, fileLength.Int64, maxInboundMediaBytes)
+	}
 	bytes, err := b.client.Download(ctx, dl)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("whatsmeow download: %w", err)
+	}
+	if len(bytes) > maxInboundMediaBytes {
+		return "", "", 0, fmt.Errorf("media for %s is %d bytes; bridge cap is %d", messageID, len(bytes), maxInboundMediaBytes)
 	}
 
 	if err := os.MkdirAll(b.cfg.MediaPath, 0o700); err != nil {
@@ -457,4 +479,17 @@ func safeMediaStem(id string) string {
 		stem = fmt.Sprintf("%s-%x", stem, sum[:8])
 	}
 	return stem
+}
+
+// insideMediaDir reports whether p (symlinks resolved) sits under root.
+func insideMediaDir(root, p string) bool {
+	r, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	q, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return false
+	}
+	return q == r || strings.HasPrefix(q, r+string(os.PathSeparator))
 }

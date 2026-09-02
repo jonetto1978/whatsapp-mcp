@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -118,6 +119,14 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 	if body.Anchor == "" {
 		body.Anchor = "oldest"
 	}
+	// Echo the count the bridge will actually use, not what was asked for.
+	count := body.Count
+	if count <= 0 {
+		count = 100
+	}
+	if count > 200 {
+		count = 200
+	}
 	walk := true
 	if body.Walk != nil {
 		walk = *body.Walk
@@ -127,7 +136,7 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if body.Anchor == "newest" {
-		anchorID, resp, err := s.bridge.RequestChatHistory(ctx, body.ChatJID, body.Count)
+		anchorID, resp, err := s.bridge.RequestChatHistory(ctx, body.ChatJID, count)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "history request failed", Details: err.Error()})
 			return
@@ -136,7 +145,7 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 			"chat_jid":        body.ChatJID,
 			"anchor":          "newest",
 			"anchor_message":  anchorID,
-			"requested_count": body.Count,
+			"requested_count": count,
 			"sent_message_id": resp.ID,
 			"sent_at_unix":    resp.Timestamp.Unix(),
 			"hint":            "Newest-anchor request: re-fetches the window already held (media-key recovery). It does not go further back — use anchor=oldest for that.",
@@ -148,7 +157,7 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a, resp, err := s.bridge.RequestOlderHistory(ctx, body.ChatJID, body.Count, walk, body.MaxRounds)
+	a, resp, err := s.bridge.RequestOlderHistory(ctx, body.ChatJID, count, walk, body.MaxRounds)
 	if err != nil {
 		code := http.StatusInternalServerError
 		if errors.Is(err, errWalkActive) {
@@ -163,7 +172,7 @@ func (s *Server) handleRequestHistory(w http.ResponseWriter, r *http.Request) {
 		"anchor_message":  a.ID,
 		"anchor_ts":       a.TS,
 		"anchor_chat_jid": a.ChatJID,
-		"requested_count": body.Count,
+		"requested_count": count,
 		"walk":            walk,
 		"max_rounds":      a.MaxRounds,
 		"sent_message_id": resp.ID,
@@ -748,10 +757,11 @@ func (s *Server) handleSearchContacts(w http.ResponseWriter, r *http.Request) {
 		SELECT jid, COALESCE(lid, ''), COALESCE(phone, ''), COALESCE(full_name, ''),
 		       COALESCE(push_name, ''), COALESCE(verified_name, ''), is_business
 		FROM contacts
-		WHERE normalized_name LIKE ? OR normalized_full_name LIKE ? OR phone LIKE ? OR lid LIKE ?
+		WHERE normalized_name LIKE ? ESCAPE '\\' OR normalized_full_name LIKE ? ESCAPE '\\'
+		   OR phone LIKE ? ESCAPE '\\' OR lid LIKE ? ESCAPE '\\'
 		ORDER BY updated_at DESC
 		LIMIT ?
-	`, "%"+norm+"%", "%"+norm+"%", "%"+query+"%", "%"+query+"%", limit)
+	`, "%"+escapeLike(norm)+"%", "%"+escapeLike(norm)+"%", "%"+escapeLike(query)+"%", "%"+escapeLike(query)+"%", limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "query failed", Details: err.Error()})
 		return
@@ -948,4 +958,13 @@ func atoiDefaultPositive(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// escapeLike neutralises SQLite LIKE metacharacters in user input so that a
+// search for "%" or "_" matches those characters literally instead of
+// turning into "everything" (Codex review, 2026-09-02). Pair with
+// `LIKE ? ESCAPE '\\'`.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }

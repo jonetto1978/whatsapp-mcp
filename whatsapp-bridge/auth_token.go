@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,6 +34,21 @@ func bridgeTokenPath(cfg *Config) string {
 // the token file (0600) if it does not exist yet. The value is never logged.
 func loadOrMintBridgeToken(cfg *Config) (token, path string, err error) {
 	path = bridgeTokenPath(cfg)
+	// An existing token file is trusted only if it is a regular file (no
+	// symlink) that nobody else can read. A 0644 leftover from an older
+	// install would hand the admin and send endpoints to any local user
+	// (Codex review, 2026-09-02). Tighten silently; refuse a symlink.
+	if info, lerr := os.Lstat(path); lerr == nil {
+		if !info.Mode().IsRegular() {
+			return "", path, fmt.Errorf("token file %s is not a regular file; refusing to use it", path)
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			if cerr := os.Chmod(path, 0o600); cerr != nil {
+				return "", path, fmt.Errorf("token file %s is mode %o and could not be tightened: %w", path, info.Mode().Perm(), cerr)
+			}
+			log.Printf("token file %s was mode %o; tightened to 0600", path, info.Mode().Perm())
+		}
+	}
 	if b, rerr := os.ReadFile(path); rerr == nil {
 		t := strings.TrimSpace(string(b))
 		if len(t) >= 32 {

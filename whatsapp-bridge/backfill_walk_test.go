@@ -350,3 +350,50 @@ func TestExtendBudgetOnlyRaises(t *testing.T) {
 		t.Fatalf("budget = %d, want 7", w.budget)
 	}
 }
+
+// TestSameSecondDifferentMessageIsProgress: WhatsApp timestamps are whole
+// seconds. A chunk whose oldest message shares the anchor's second but is a
+// different message is real progress and must not stop the walk; the exact
+// anchor coming back must.
+func TestSameSecondDifferentMessageIsProgress(t *testing.T) {
+	w := newWalkerForTest(100, 10)
+	if !w.beginModeID("c@lid", 5000, "MSG-C", 100, "older", 0) {
+		t.Fatal("beginModeID returned false")
+	}
+	if d := w.nextID("c@lid", 5000, "MSG-A", false); !d.Continue {
+		t.Fatalf("same second, different id: stopped (%s), want continue", d.Reason)
+	}
+	w.mu.Lock()
+	id := w.chats["c@lid"].anchorID
+	w.mu.Unlock()
+	if id != "MSG-A" {
+		t.Fatalf("anchorID = %q, want MSG-A (anchor did not advance)", id)
+	}
+	if d := w.nextID("c@lid", 5000, "MSG-A", false); d.Continue || d.Reason != "no_progress" {
+		t.Fatalf("exact anchor returned: got continue=%v reason=%q, want stop no_progress", d.Continue, d.Reason)
+	}
+}
+
+// TestSameSecondWithoutIDsStillStops: callers that cannot supply ids keep the
+// old timestamp-only semantics, so nothing loops on an empty id.
+func TestSameSecondWithoutIDsStillStops(t *testing.T) {
+	w := newWalkerForTest(100, 10)
+	w.beginMode("c@lid", 5000, 100, "older", 0)
+	if d := w.next("c@lid", 5000, false); d.Continue {
+		t.Fatal("same second with no ids must stop")
+	}
+}
+
+// TestAnyActiveSeesAliases: a walk registered under one JID form is visible
+// when queried with the alias set, so a second walk on the same human is
+// refused instead of overwriting or stealing chunks.
+func TestAnyActiveSeesAliases(t *testing.T) {
+	w := newWalkerForTest(100, 10)
+	w.beginMode("5491100000000@s.whatsapp.net", 5000, 100, "repair", 0)
+	if !w.anyActive([]string{"123@lid", "5491100000000@s.whatsapp.net"}) {
+		t.Fatal("anyActive missed the walk registered under the phone alias")
+	}
+	if w.anyActive([]string{"999@lid"}) {
+		t.Fatal("anyActive reported a walk for an unrelated chat")
+	}
+}

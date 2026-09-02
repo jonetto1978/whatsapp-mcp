@@ -63,7 +63,8 @@ const (
 // walkState is one chat's position in its backwards walk.
 type walkState struct {
 	rounds     int
-	anchorTS   int64 // timestamp of the anchor we last asked about
+	anchorTS   int64  // timestamp of the anchor we last asked about
+	anchorID   string // id of that anchor — see next(): same second ≠ same message
 	lastReqAt  time.Time
 	perChat    int
 	stopReason string
@@ -137,10 +138,22 @@ func (w *backfillWalker) reset(budget, maxRounds, perChat int) {
 
 // isActive reports whether a walk is registered for key.
 func (w *backfillWalker) isActive(key string) bool {
+	return w.anyActive([]string{key})
+}
+
+// anyActive reports whether a walk is registered under ANY of the keys —
+// callers pass a JID plus its aliases, so a repair walk under the LID form
+// and an API walk under the phone form cannot run side by side and steal
+// each other's chunks (Codex review, 2026-09-02).
+func (w *backfillWalker) anyActive(keys []string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, ok := w.chats[key]
-	return ok
+	for _, k := range keys {
+		if _, ok := w.chats[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // release drops a walk without it having reached a brake — used when the
@@ -163,6 +176,14 @@ func (w *backfillWalker) begin(chatJID string, anchorTS int64, perChat int) bool
 // beginMode is begin with an explicit mode and an optional per-chat round cap
 // (0 = walker default). See walkState.mode for what the modes mean.
 func (w *backfillWalker) beginMode(chatJID string, anchorTS int64, perChat int, mode string, maxRounds int) bool {
+	return w.beginModeID(chatJID, anchorTS, "", perChat, mode, maxRounds)
+}
+
+// beginModeID is beginMode with the anchor's message id recorded, so a chunk
+// that lands on the same second but a different (older) message still counts
+// as progress. WhatsApp timestamps are whole seconds; several messages in
+// one second is ordinary (Codex review, 2026-09-02).
+func (w *backfillWalker) beginModeID(chatJID string, anchorTS int64, anchorID string, perChat int, mode string, maxRounds int) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.spent >= w.budget {
@@ -176,6 +197,7 @@ func (w *backfillWalker) beginMode(chatJID string, anchorTS int64, perChat int, 
 	w.chats[chatJID] = &walkState{
 		rounds:    1,
 		anchorTS:  anchorTS,
+		anchorID:  anchorID,
 		lastReqAt: time.Now(),
 		perChat:   perChat,
 		mode:      mode,
@@ -228,6 +250,13 @@ type walkDecision struct {
 // Every brake lives here, in one place, so the stop conditions can be read and
 // tested together rather than being scattered through the delivery path.
 func (w *backfillWalker) next(chatJID string, chunkOldestTS int64, hasOlderEmpties bool) walkDecision {
+	return w.nextID(chatJID, chunkOldestTS, "", hasOlderEmpties)
+}
+
+// nextID is next() with the delivered chunk's oldest message id. Progress is
+// "strictly older timestamp" OR "same timestamp but a different message than
+// the anchor". Same timestamp AND same id (or no id) is the replay case.
+func (w *backfillWalker) nextID(chatJID string, chunkOldestTS int64, chunkOldestID string, hasOlderEmpties bool) walkDecision {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -248,7 +277,8 @@ func (w *backfillWalker) next(chatJID string, chunkOldestTS int64, hasOlderEmpti
 	// Brake 2: we asked for messages before anchorTS and got back a window
 	// whose oldest message is not older than that. We are not advancing, so
 	// stepping again would replay the same window indefinitely.
-	if chunkOldestTS <= 0 || chunkOldestTS >= st.anchorTS {
+	sameSecondNewMsg := chunkOldestTS == st.anchorTS && chunkOldestID != "" && st.anchorID != "" && chunkOldestID != st.anchorID
+	if chunkOldestTS <= 0 || chunkOldestTS > st.anchorTS || (chunkOldestTS == st.anchorTS && !sameSecondNewMsg) {
 		return stop("no_progress")
 	}
 	// Brake 3: nothing left worth fetching further back. Repair mode only —
@@ -272,6 +302,9 @@ func (w *backfillWalker) next(chatJID string, chunkOldestTS int64, hasOlderEmpti
 	w.spent++
 	st.rounds++
 	st.anchorTS = chunkOldestTS
+	if chunkOldestID != "" {
+		st.anchorID = chunkOldestID
+	}
 	st.lastReqAt = time.Now()
 	return walkDecision{Continue: true, PerChat: st.perChat}
 }
@@ -365,7 +398,7 @@ func (b *Bridge) continueWalk(ctx context.Context, chatJID string, oldest chunkA
 		return
 	}
 
-	d := b.walker.next(key, oldest.TS, hasOlder)
+	d := b.walker.nextID(key, oldest.TS, oldest.ID, hasOlder)
 	if !d.Continue {
 		if d.Reason != "not_walking" {
 			log.Printf("backfill walk: %s stopped (%s)", chatJID, d.Reason)
@@ -407,4 +440,21 @@ func (b *Bridge) WalkStats() (active, spent, budget int, stopped map[string]int)
 		return 0, 0, 0, map[string]int{}
 	}
 	return b.walker.stats()
+}
+
+// releaseWalkFor drops any walk registered for chatJID or one of its aliases.
+// Called on delivery-path errors that skip continueWalk, so a transient DB
+// failure cannot leave a chat pinned as "walking" and answering 409 until a
+// stale sweep happens to reset it (Codex review, 2026-09-02).
+func (b *Bridge) releaseWalkFor(ctx context.Context, chatJID, reason string) {
+	if b.walker == nil {
+		return
+	}
+	keys := []string{chatJID}
+	if al, err := resolveAliases(ctx, b.db, chatJID); err == nil && len(al) > 0 {
+		keys = al
+	}
+	for _, k := range keys {
+		b.walker.release(k, reason)
+	}
 }

@@ -128,9 +128,16 @@ func BackfillJIDAliases(ctx context.Context, db *sql.DB, client *whatsmeow.Clien
 	for rows.Next() {
 		var j string
 		if err := rows.Scan(&j); err != nil {
-			continue
+			rows.Close()
+			return 0, 0, fmt.Errorf("scan contact jid: %w", err)
 		}
 		contactJIDs = append(contactJIDs, j)
+	}
+	// A partial contact list would silently leave split histories hidden
+	// (review finding, 2026-09-02): surface iteration errors instead.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, fmt.Errorf("iterate contacts: %w", err)
 	}
 	rows.Close()
 

@@ -1,3 +1,32 @@
+## 0.4.1 — 2026-09-02
+
+Second pass: four Codex (gpt-5.5) reviews on top of the four Claude ones (`docs/reviews/2026-09-02-codex-*.md`).
+
+- **DB key never enters argv.** First-run keychain creation used `security add-generic-password -w <key>`,
+  visible to every local process for the duration of the call. The command now goes over stdin
+  (`security -i`), and the item is read back and compared before the key is trusted.
+- **Post-send persist could not fail-safe under `foreign_keys=on`:** a first message to a brand-new contact
+  sent fine and then silently failed to persist (no `chats` parent). The parent is upserted first, and a
+  failed persist is logged with the draft and WhatsApp ids.
+- **History sync now upgrades `[undecryptable: …]` placeholders** the same way the live path does, and
+  stores `raw_type` on backfilled rows (they were invisible to the undecoded counters).
+- **A failed chat upsert no longer pins a walk** in `walking` state (409 forever until a stale sweep).
+- **Same-second walk brake:** two rounds ending on different ids in the same second no longer count as
+  "no progress"; alias-aware active-walk check.
+- Outbound `file_path` is size-checked **before** it is read (a multi-GB file under `~/Downloads` was read
+  whole); inbound downloads capped at 256 MiB (declared length and actual bytes).
+- Token file: symlinks refused, group/other bits tightened to 0600 at startup. `.env` with loose
+  permissions logs a warning naming the `chmod`.
+- Contact search escapes `%` and `_` (`q=%` returned the whole address book).
+- Alias backfill surfaces scan/iteration errors instead of silently returning a partial list.
+- Python: `healthcheck` returns the degraded body instead of raising on 503; `count`/`limit` clamped;
+  `confirm_send` error codes; per-call timeouts; ruff clean.
+
+**Still open (reviewed, not fixed):** media-draft confirm claims the row after the upload (duplicate upload
+possible under two concurrent confirms); `audit.log` stores JIDs and search terms in clear (0600); the
+scrubber is exact-phrase only (homoglyph/zero-width bypasses are documented skips); JSON bodies are not
+strict-decoded.
+
 ## 0.4.0 — 2026-09-02
 
 Security and robustness pass driven by four independent code reviews (see `docs/reviews/`).

@@ -31,6 +31,12 @@ func loadDotEnv() {
 		if err != nil || info.IsDir() {
 			continue
 		}
+		// .env may carry WHATSAPP_DB_KEY or an API key. The loader never
+		// enforced who else can read it (Codex review, 2026-09-02): say so
+		// loudly rather than load a secret another local user can also read.
+		if info.Mode().Perm()&0o077 != 0 {
+			log.Printf("WARNING: env file %s is mode %o (group/other readable) and may hold secrets — run: chmod 600 %s", path, info.Mode().Perm(), path)
+		}
 		applied, err := applyEnvFile(path)
 		if err != nil {
 			log.Printf("env file %s: %v (continuing with process env)", path, err)

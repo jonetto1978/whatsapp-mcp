@@ -137,6 +137,12 @@ func materializeOutboundFile(ctx context.Context, cfg *Config, draftID string, r
 		if info.IsDir() {
 			return outboundFile{}, fmt.Errorf("file_path %q is a directory", req.FilePath)
 		}
+		// Reject by size BEFORE reading: os.ReadFile of a multi-GB file under
+		// an allowed root would exhaust memory long before checkSizeLimit ran
+		// (Codex review, 2026-09-02). The per-type check below still applies.
+		if info.Size() > maxDocumentBytes {
+			return outboundFile{}, fmt.Errorf("file_path %q is %d bytes; the WhatsApp ceiling is %d", req.FilePath, info.Size(), maxDocumentBytes)
+		}
 		data, err = os.ReadFile(clean)
 		if err != nil {
 			return outboundFile{}, fmt.Errorf("reading file_path %q: %w", req.FilePath, err)

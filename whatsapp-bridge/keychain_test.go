@@ -32,7 +32,13 @@ func installShim(t *testing.T, name, body string) (logPath string) {
 	t.Helper()
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "invocations.log")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\n" + body + "\n"
+	// argv is logged as-is. For `security -i` (interactive: the command comes
+	// on stdin, keeping the DB key out of argv) the stdin line is logged with
+	// a "stdin: " prefix and re-split into $@ so the case bodies below see the
+	// subcommand exactly as the argv form did.
+	script := "#!/bin/sh\nSHIM_STATE='" + filepath.Join(dir, "state") + "'\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\n" +
+		"if [ \"$1\" = \"-i\" ]; then read -r line; printf 'stdin: %s\\n' \"$line\" >> '" + logPath + "'; set -- $line; fi\n" +
+		body + "\n"
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -229,13 +235,17 @@ exit 0`)
 // the write instead of being silently replaced.
 func TestMacOSProvenNotFoundMintsCreateOnly(t *testing.T) {
 	skipOnWindows(t)
+	// Stateful: the write is read back and compared, so the shim must
+	// return what it stored. Builtins only — PATH is the shim dir alone.
 	logPath := installShim(t, "security", `
 case "$1" in
   find-generic-password)
+    if [ -f "$SHIM_STATE" ]; then read -r v < "$SHIM_STATE"; printf '%s\n' "$v"; exit 0; fi
     echo "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." >&2
     exit 44
     ;;
   add-generic-password)
+    while [ $# -gt 0 ]; do if [ "$1" = "-w" ]; then printf '%s\n' "$2" > "$SHIM_STATE"; fi; shift; done
     exit 0
     ;;
 esac
@@ -243,7 +253,7 @@ exit 0`)
 
 	key, err := getOrCreateDBKeyMacOS("whatsapp-mcp-test-shim", "test-account", absentStorePath(t))
 	if err != nil {
-		t.Fatalf("proven not-found on a fresh install must mint: %v", err)
+		t.Fatalf("proven not-found on a fresh install must mint: %v\nshim log:\n%s", err, readShimLog(t, logPath))
 	}
 	if len(key) != 64 {
 		t.Fatalf("expected 64 hex chars, got %d", len(key))
@@ -257,6 +267,39 @@ exit 0`)
 	}
 	if strings.Contains(log, "-U") {
 		t.Errorf("the write must be create-only (no -U overwrite flag):\n%s", log)
+	}
+	// The key must travel on stdin only: no argv line may carry it
+	// (Codex review, 2026-09-02 — argv is readable by every local process).
+	for _, line := range strings.Split(log, "\n") {
+		if strings.HasPrefix(line, "stdin: ") {
+			continue
+		}
+		if strings.Contains(line, key) {
+			t.Errorf("DB key leaked into argv: %s", line)
+		}
+	}
+}
+
+// A write that "succeeds" but does not read back as the same key must fail
+// loudly: otherwise the bridge would run with a key the keychain never held.
+func TestMacOSWriteReadBackMismatchFailsLoud(t *testing.T) {
+	skipOnWindows(t)
+	installShim(t, "security", `
+case "$1" in
+  find-generic-password)
+    if [ -f "$SHIM_STATE" ]; then echo "0000000000000000000000000000000000000000000000000000000000000000"; exit 0; fi
+    exit 44
+    ;;
+  add-generic-password)
+    : > "$SHIM_STATE"
+    exit 0
+    ;;
+esac
+exit 0`)
+	if key, err := getOrCreateDBKeyMacOS("whatsapp-mcp-test-shim", "test-account", absentStorePath(t)); err == nil {
+		t.Fatalf("read-back mismatch must fail, got key %q", key)
+	} else if !strings.Contains(err.Error(), "read-back") {
+		t.Errorf("error must say read-back, got: %v", err)
 	}
 }
 

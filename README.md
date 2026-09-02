@@ -29,7 +29,7 @@ The most-starred WhatsApp MCP (`lharries/whatsapp-mcp`, 5.6K stars) is the archi
 | DB encryption | Plain SQLite | SQLCipher with key in the platform secret store (macOS Keychain / Windows Credential Manager / libsecret) |
 | Prompt-injection scrubber | None | Every inbound message |
 | Send safety | Fires immediately | Mandatory `confirm_send` between draft and delivery |
-| Audit log | None | Every tool call, 30-day retention |
+| Audit log | None | Every tool call (JIDs, queries, paths); 0600; no rotation yet — prune by hand |
 | Voice notes | Not transcribed | `whisper.cpp` local, Spanish-tuned default |
 | LID alias resolution | Open issue cluster upstream | Shipped, with backfill migration for legacy threads |
 | CI security | None | `govulncheck` + `pip-audit` + Dependabot, daily |
@@ -134,7 +134,7 @@ Short version:
 
 - Bridge binds to `127.0.0.1` only, never `0.0.0.0`
 - SQLite encrypted at rest with SQLCipher; key stored in the platform secret store (macOS Keychain / Windows Credential Manager / libsecret), with an explicit `WHATSAPP_DB_KEY` escape hatch
-- Every tool call logged to `audit.log` with 30-day retention
+- Every tool call logged to `audit.log` (0600). No rotation or retention pruning exists yet; the file grows until you prune it
 - Send tools require an explicit `confirm_send` step between draft and delivery
 - Incoming message text passes through a prompt-injection scrubber before Claude sees it
 - `whatsmeow` pinned to a specific commit; upgrades require diff review

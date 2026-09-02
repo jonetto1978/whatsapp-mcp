@@ -140,6 +140,8 @@ func (b *Bridge) processHistorySyncEvent(evt *events.HistorySync) {
 		`, chatJID, chatTypeFromJIDString(chatJID), nullIfEmpty(chatName), nullIfEmpty(Normalize(chatName)),
 			convMaxTS, nullIfEmpty(convPreview), convMaxTS, convMaxTS); err != nil {
 			log.Printf("history_sync: chat upsert %s failed: %v", chatJID, err)
+			// Do not leave the walk pinned: this `continue` skips continueWalk.
+			b.releaseWalkFor(context.Background(), chatJID, "chat_upsert_failed")
 			continue
 		}
 
@@ -184,16 +186,40 @@ func (b *Bridge) processHistorySyncEvent(evt *events.HistorySync) {
 			// overlapping history chunks (and re-pairing) idempotent, and leaves
 			// any live-received row untouched. Columns mirror onMessage exactly,
 			// so a backfilled row is indistinguishable from a live one.
+			// Same UPGRADE predicate as onMessage (bridge.go, MYC-3569): a row the
+			// live path stored as an [undecryptable: …] placeholder is replaced
+			// when a history chunk carries the decoded content. A real row is
+			// never rewritten, a blank never overwrites a marker, and overlapping
+			// chunks stay idempotent (Codex review, 2026-09-02). raw_type rides
+			// along so /healthcheck's undecoded counters also see backfilled rows.
 			res, err := b.db.Exec(`
 				INSERT INTO messages (id, chat_jid, sender_jid, sender_display, timestamp, type, content_text, content_normalized, is_from_me, scrubbed_text, scrub_flags_json,
-					media_key, media_direct_path, media_url, media_enc_sha256, media_sha256, media_file_length, media_key_timestamp, media_mime)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(id) DO NOTHING
+					media_key, media_direct_path, media_url, media_enc_sha256, media_sha256, media_file_length, media_key_timestamp, media_mime, raw_type)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				ON CONFLICT(id) DO UPDATE SET
+					type = excluded.type,
+					content_text = excluded.content_text,
+					content_normalized = excluded.content_normalized,
+					sender_display = excluded.sender_display,
+					scrubbed_text = excluded.scrubbed_text,
+					scrub_flags_json = excluded.scrub_flags_json,
+					raw_type = excluded.raw_type,
+					media_key = excluded.media_key,
+					media_direct_path = excluded.media_direct_path,
+					media_url = excluded.media_url,
+					media_enc_sha256 = excluded.media_enc_sha256,
+					media_sha256 = excluded.media_sha256,
+					media_file_length = excluded.media_file_length,
+					media_key_timestamp = excluded.media_key_timestamp,
+					media_mime = excluded.media_mime
+				WHERE messages.content_text LIKE ?
+				  AND (COALESCE(excluded.content_text, '') <> '' OR excluded.type <> 'system')
 			`, key.GetID(), chatJID, senderJID, senderDisplay, ts, msgType, content, normalized,
 				boolToInt(fromMe), scrubbed, ScrubFlagsJSON(flags),
 				mfields.MediaKey, mfields.MediaDirectPath, mfields.MediaURL,
 				mfields.MediaEncSHA, mfields.MediaSHA, mfields.MediaFileLength,
-				mfields.MediaKeyTimestamp, mfields.MediaMime)
+				mfields.MediaKeyTimestamp, mfields.MediaMime, rawTypeNullable(msgType, content),
+				undecryptablePrefix+"%")
 			if err != nil {
 				log.Printf("history_sync: insert %s failed: %v", key.GetID(), err)
 				continue
@@ -418,11 +444,15 @@ func (b *Bridge) RequestOlderHistory(ctx context.Context, chatJID string, count 
 	// Register the walk BEFORE sending, so the chunk's delivery finds it.
 	registered := false
 	if walk && b.walker != nil {
-		if b.walker.isActive(a.ChatJID) {
+		keys := []string{a.ChatJID}
+		if al, aerr := resolveAliases(ctx, b.db, a.ChatJID); aerr == nil {
+			keys = al
+		}
+		if b.walker.anyActive(keys) {
 			return a, resp, errWalkActive
 		}
 		b.walker.extendBudget(maxRounds)
-		if !b.walker.beginMode(a.ChatJID, a.TS, count, "older", maxRounds) {
+		if !b.walker.beginModeID(a.ChatJID, a.TS, a.ID, count, "older", maxRounds) {
 			return a, resp, errors.New("walk budget exhausted")
 		}
 		registered = true

@@ -154,12 +154,37 @@ func getOrCreateDBKeyMacOS(service, account, dbPath string) (string, error) {
 			// after a PROVEN not-found; if an item appears concurrently,
 			// exit 45 (errSecDuplicateItem) fails the write instead of
 			// silently overwriting a key we never read.
-			return runWithStderr(keychainCmd("security", "add-generic-password",
+			//
+			// The key never enters argv. `security -i` reads the command
+			// from stdin, so a process listing taken during first-run
+			// creation cannot capture the DB key (Codex review,
+			// 2026-09-02). Verified live on macOS 26: create exits 0,
+			// a duplicate still exits 45 and leaves the existing item
+			// untouched. The item is then read back and compared, so a
+			// tokenizer surprise fails loudly instead of leaving the
+			// bridge with a key the keychain does not hold.
+			for _, v := range []string{service, account, key} {
+				if strings.ContainsAny(v, " \t\r\n\"'") {
+					return fmt.Errorf("keychain item field %q contains whitespace or quotes; refusing to build an interactive command", v)
+				}
+			}
+			cmd := keychainCmd("security", "-i")
+			cmd.Stdin = strings.NewReader("add-generic-password -s " + service + " -a " + account + " -w " + key + " -T \"\"\n")
+			if err := runWithStderr(cmd); err != nil {
+				return err
+			}
+			out, err := outputWithTimeout(keychainCmd("security", "find-generic-password",
 				"-s", service,
 				"-a", account,
-				"-w", key,
-				"-T", "", // restrict access to this binary path; empty = default ACL
+				"-w",
 			))
+			if err != nil {
+				return fmt.Errorf("key written but read-back failed: %w", execErrDetail(err))
+			}
+			if got := strings.TrimSpace(string(out)); got != key {
+				return fmt.Errorf("key written but read-back returned a different value (%d chars); the keychain item is not the key this process holds", len(got))
+			}
+			return nil
 		},
 	}.getOrCreate(dbPath)
 }

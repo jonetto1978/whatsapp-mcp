@@ -473,6 +473,20 @@ func (s *Server) handleConfirmSend(w http.ResponseWriter, r *http.Request) {
 	persistText, persistType := extractContentFromProto(msg)
 	mfields, _ := extractDownloadableFieldsFromProto(msg)
 	scrubbed, flags := Scrub(persistText)
+	// The chat parent must exist first: messages.chat_jid is a FOREIGN KEY and
+	// foreign_keys is enforced since 0.4.0. A first message to a brand-new
+	// contact otherwise sends fine and then fails to persist locally — the
+	// recipient has it, our history does not (Codex review, 2026-09-02).
+	if _, cerr := s.db.ExecContext(persistCtx, `
+		INSERT INTO chats (jid, chat_type, name, normalized_name, last_message_time, last_message_preview, created_at, updated_at)
+		VALUES (?, ?, NULL, NULL, ?, ?, ?, ?)
+		ON CONFLICT(jid) DO UPDATE SET
+			last_message_time    = MAX(COALESCE(chats.last_message_time, 0), excluded.last_message_time),
+			last_message_preview = CASE WHEN excluded.last_message_time >= COALESCE(chats.last_message_time, 0) THEN excluded.last_message_preview ELSE chats.last_message_preview END,
+			updated_at           = excluded.updated_at
+	`, recipientJID, chatTypeFromJIDString(recipientJID), sentAt, nullIfEmpty(truncate(persistText, 120)), sentAt, sentAt); cerr != nil {
+		log.Printf("draft %s: SENT as %s but chat parent upsert FAILED: %v — the local history row will be missing", draftID, whatsappID, cerr)
+	}
 	_, err = s.db.ExecContext(persistCtx, `
 		INSERT INTO messages (id, chat_jid, sender_jid, sender_display, timestamp, type, content_text, content_normalized, is_from_me, scrubbed_text, scrub_flags_json,
 			media_key, media_direct_path, media_url, media_enc_sha256, media_sha256, media_file_length, media_key_timestamp, media_mime)
@@ -484,7 +498,8 @@ func (s *Server) handleConfirmSend(w http.ResponseWriter, r *http.Request) {
 		mfields.MediaEncSHA, mfields.MediaSHA, mfields.MediaFileLength,
 		mfields.MediaKeyTimestamp, mfields.MediaMime)
 	if err != nil {
-		log.Printf("sent-message persist failed: %v", err)
+		// Loud and specific: the recipient has this message; our archive does not.
+		log.Printf("draft %s: SENT as %s but sent-message persist FAILED: %v — local history is missing this message", draftID, whatsappID, err)
 	}
 
 	// The draft's bytes have served their purpose: Upload happened above, and a
