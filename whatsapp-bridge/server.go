@@ -471,6 +471,9 @@ type bridgeStateBrief struct {
 }
 
 func (s *Server) currentBridgeState() *bridgeStateBrief {
+	if s.bridge == nil { // handler tests build a Server with only a DB
+		return nil
+	}
 	connected, authed, _, _ := s.bridge.Status()
 	snap := s.bridge.AuthSnapshot()
 	return &bridgeStateBrief{Connected: connected, Authenticated: authed, AuthState: string(snap.State)}
@@ -757,8 +760,8 @@ func (s *Server) handleSearchContacts(w http.ResponseWriter, r *http.Request) {
 		SELECT jid, COALESCE(lid, ''), COALESCE(phone, ''), COALESCE(full_name, ''),
 		       COALESCE(push_name, ''), COALESCE(verified_name, ''), is_business
 		FROM contacts
-		WHERE normalized_name LIKE ? ESCAPE '\\' OR normalized_full_name LIKE ? ESCAPE '\\'
-		   OR phone LIKE ? ESCAPE '\\' OR lid LIKE ? ESCAPE '\\'
+		WHERE normalized_name LIKE ? ESCAPE '\' OR normalized_full_name LIKE ? ESCAPE '\'
+		   OR phone LIKE ? ESCAPE '\' OR lid LIKE ? ESCAPE '\'
 		ORDER BY updated_at DESC
 		LIMIT ?
 	`, "%"+escapeLike(norm)+"%", "%"+escapeLike(norm)+"%", "%"+escapeLike(query)+"%", "%"+escapeLike(query)+"%", limit)
@@ -780,6 +783,14 @@ func (s *Server) handleSearchContacts(w http.ResponseWriter, r *http.Request) {
 		}
 		m.c.IsBusiness = m.isBiz == 1
 		matches = append(matches, m)
+	}
+	// A step error (a bad ESCAPE literal did exactly this on 2026-09-02) ends
+	// rows.Next() early with no rows; without this check the caller saw a
+	// clean, empty "no contacts" instead of the failure.
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: "query failed", Details: err.Error()})
+		return
 	}
 	rows.Close()
 
@@ -963,7 +974,7 @@ func atoiDefaultPositive(s string, def int) int {
 // escapeLike neutralises SQLite LIKE metacharacters in user input so that a
 // search for "%" or "_" matches those characters literally instead of
 // turning into "everything" (Codex review, 2026-09-02). Pair with
-// `LIKE ? ESCAPE '\\'`.
+// `LIKE ? ESCAPE '\'`.
 func escapeLike(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(s)
