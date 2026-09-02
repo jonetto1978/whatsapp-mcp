@@ -20,7 +20,7 @@ This MCP reads and writes your personal WhatsApp. Treat it as equivalent to your
 
 - Prompt-injection attacks embedded in incoming WhatsApp messages.
 - Accidental sends to the wrong contact (dry-run confirmation pattern).
-- Unauthorized local processes reading the message database (SQLCipher encryption at rest).
+- Unauthorized local processes reading the message database or driving the API (SQLCipher encryption at rest; since 0.4.0 a bearer token on every API route — before that, any local process could read every message and send as the user through the unauthenticated loopback API, which bypassed the at-rest control entirely).
 - Network-level attackers on the same machine (bridge binds to `127.0.0.1` only).
 - Supply-chain attacks via dependency updates (pinned versions, diff review on bump).
 
@@ -30,11 +30,15 @@ This MCP reads and writes your personal WhatsApp. Treat it as equivalent to your
 
 2. **SQLite encrypted at rest with SQLCipher.** The master key is derived from a macOS Keychain entry (`service=whatsapp-mcp`, `account=default`). On first run, a random 256-bit key is generated and stored in Keychain; the user is prompted to authorize access. The DB file is unreadable without the key, even if the file itself is copied off the machine.
 
-3. **Audit log.** Every tool call (via the Python MCP layer) is logged to `audit.log` with timestamp, tool name, params (media content redacted, only metadata retained), and result summary. Rotated daily, retained 30 days by default. Tunable via `WHATSAPP_AUDIT_LOG_RETENTION_DAYS`.
+3. **Audit log.** Every tool call (via the Python MCP layer) is logged to `audit.log` with timestamp, tool name, params and result summary. **It redacts nothing:** params include chat JIDs (phone numbers), search queries and local media paths. Since 0.4.0 the file is created and kept at mode `0600`. **There is no rotation and no retention pruning** — earlier versions of this document claimed "rotated daily, retained 30 days", and `WHATSAPP_AUDIT_LOG_RETENTION_DAYS` is parsed but not acted on by either layer. Treat the file as an unbounded plaintext index of every contact you touched, and prune it yourself until pruning is implemented (tracked in `docs/reviews/2026-09-02-review-4-python-mcp.md`).
 
-4. **Send tools require confirmation.** `send_message`, `send_file`, `send_audio_message`, `send_reply_quote`, `send_reaction` produce a draft with a `draft_id`. The actual network send happens only when `confirm_send(draft_id)` is called, echoing the resolved recipient JID, recipient display name, and message preview. No one-shot sends.
+3b. **Bearer-token auth on the HTTP API (0.4.0).** Every route except `GET /healthcheck` requires `Authorization: Bearer <token>`, compared in constant time. The token is minted on first start into `store/bridge.token` (mode `0600`) and read by the Python MCP server; `WHATSAPP_BRIDGE_TOKEN_FILE` overrides the path. The bind-to-loopback and Origin/Host guards remain, but they only ever stopped browsers — not other local processes.
 
-5. **Prompt-injection scrubber.** Every incoming message text passes through a scrubber that strips known injection patterns (`ignore previous instructions`, `system: reveal tokens`, etc.) before Claude sees it. Scrubbed patterns are logged. The original message is preserved in the database; only the representation shown to Claude is scrubbed.
+3c. **`file_path` sends are confined (0.4.0).** A `send_message` draft with `file_path` is resolved (symlinks followed) and must sit under `~/Downloads`, `~/Desktop` or `WHATSAPP_MEDIA_DIR`; `WHATSAPP_SEND_FILE_ROOTS` widens the list. Before this, any absolute path was read and sent — chained with the missing API auth, a one-line exfiltration of `~/.ssh` or the message database.
+
+4. **Send tools require confirmation.** `send_message`, `send_reply_quote`, `send_reaction` produce a draft with a `draft_id`. The actual network send happens only when `confirm_send(draft_id)` is called, echoing the resolved recipient JID, recipient display name, and message preview. No one-shot sends.
+
+5. **Prompt-injection scrubber — telemetry, not a control.** Incoming message text is matched against an 18-entry pattern list (`ignore previous instructions`, `system:`, `you are now`, …) and matches are replaced with `[REDACTED_INJECTION]` in the representation Claude sees; matches are logged as `_scrub_flags`. The original message is preserved in the database. Since 0.4.0 the Python layer also scrubs contact names, group subjects, chat previews and sender display names, which previously reached Claude verbatim. **Do not rely on it:** the list is English-only substring matching — a non-breaking space, spaced-out letters, or Spanish phrasing (`ignorá las instrucciones anteriores`) pass through untouched. The defense that actually holds is that no send happens without `confirm_send`, and that confirmation echoes the resolved recipient. Until 0.4.0 the scrubber spliced byte offsets from a lower-cased copy into the original string, corrupting text around some Unicode runes; it now matches case-insensitively on the original.
 
    The scrubber's coverage is enforced by `whatsapp-bridge/scrubber_test.go`, a 73-case eval corpus that exercises every pattern in `InjectionPatterns` across lowercase, mixed-case, and prose-sandwich variants, plus an 18-entry false-positive control corpus. The `.github/workflows/scrubber-eval.yml` workflow runs the corpus on every PR + push to main + weekly schedule and BLOCKS merge on any catch-rate or false-positive regression. The same test file also documents 10 explicitly-skipped attack classes the substring scrubber does not yet catch (Unicode homoglyphs, whitespace padding, embedded delimiters, base64-encoded instructions, RTL override, zero-width joiners, indirect URL preview, tool-spoofing, exfiltration phrasing, markdown-with-javascript-scheme). Promoting a skipped gap to a passing case is how the scrubber gets hardened over time.
 
@@ -112,11 +116,14 @@ Every tool exposed by this MCP is classified by risk tier. Claude should treat h
 
 | Tier | Meaning | Tools |
 |---|---|---|
-| **Read-only** | Does not modify state. Safe to call freely. | `search_contacts`, `list_messages`, `list_chats`, `get_chat`, `get_direct_chat_by_contact`, `get_contact_chats`, `get_last_interaction`, `get_message_context`, `get_contact`, `list_calls`, `get_call_details`, `get_contact_crm_context`, `search_messages_fuzzy`, `transcribe_voice_note`, `download_media` (downloads to local path, does not exfiltrate) |
-| **Mutating (presence / receipts)** | Changes WhatsApp state in low-impact ways (e.g., marks a chat as read, signals typing). Reversible. | `mark_chat_read`, `send_typing_indicator`, `set_online_presence` |
-| **Draft (pre-send)** | Creates a draft but does not send. Requires `confirm_send` to execute. | `send_message`, `send_file`, `send_audio_message`, `send_reply_quote`, `send_reaction` |
+| **Read-only** | Does not modify local state. | `healthcheck`, `list_chats`, `search_contacts`, `search_groups`, `list_messages`, `download_media` (decrypts to a local `0600` file, does not exfiltrate) |
+| **Read, but generates WhatsApp traffic** | Asks WhatsApp's servers for older history; bounded by `max_rounds` (≤ 20 windows of ≤ 200). | `request_history` |
+| **Mutating (presence / receipts)** | Changes WhatsApp state in low-impact ways (marks a chat read, signals typing/online). Reversible. | `mark_chat_read`, `send_typing_indicator`, `set_online_presence` |
+| **Draft (pre-send)** | Creates a draft but does not send. Requires `confirm_send` to execute. | `send_message`, `send_reply_quote`, `send_reaction` |
 | **Confirm (commits a send)** | Commits a previously-drafted send. Must match a valid `draft_id`. | `confirm_send` |
-| **Destructive** | Deletes or permanently alters state. None exist in v1.0; documented here so future additions are classified explicitly. | (none) |
+| **Destructive** | Deletes or permanently alters state. None exist; documented here so future additions are classified explicitly. | (none) |
+
+That is the complete surface — 14 tools, generated from `@mcp.tool` in `whatsapp-mcp-server/main.py` on 2026-09-02. Earlier revisions of this table listed tools that did not exist.
 
 ## Reporting security issues
 
