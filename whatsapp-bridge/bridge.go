@@ -61,6 +61,9 @@ type Bridge struct {
 	deviceJID     string
 	lastSyncTime  time.Time
 
+	nativeMu   sync.Mutex
+	nativeJobs map[string]*nativeVoiceJob
+
 	// Auth lifecycle surfaced over /api/status + /api/auth/* (see auth.go).
 	authState        AuthState
 	currentQR        string

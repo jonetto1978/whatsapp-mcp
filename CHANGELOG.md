@@ -1,3 +1,28 @@
+## 0.5.0 — 2026-09-11
+
+- Added MCP `list_native_messages`: read-only macOS chat history with source,
+  aliases, pagination and separate text/audio counts.
+- Added MCP `recover_voice_note`: native/cache verification, media download,
+  linked-phone re-upload requests, full audio decode and configured speech
+  transcription. This path needs no computer-use or keyboard input.
+- Recovery calls share active jobs. Pending replies and terminal failures stay
+  distinct from saved audio and completed transcripts. Native keys and signed
+  locations stay inside the bridge; native databases are not modified.
+- Added tests for read-only access, cross-chat boundaries, tied timestamps,
+  retry coalescing, failed phone responses, hash/path limits, transcript reuse
+  and MCP scrubbing. Updated initialization instructions and workflow.
+
+- Added the portable Google Drive companion: folder creation/listing, content uploads,
+  file readback and bounded reads of monthly chat archives. Explicit chat/date scope,
+  opt-in transcripts, pagination and SHA-256 checks; no automatic history expansion.
+- Included the tested Drive source and OAuth setup flow in this fork, with account
+  settings and credentials kept outside Git. Normal archive content has no extra encryption.
+- Added Python lockfiles, matching fork versions/install links and CI tests for both
+  Python components across macOS, Linux and Windows. Native recovery still depends
+  on the Mac app database schema; saved Drive reads do not.
+- Kept message rows, retained audio, transcripts and pending history requests distinct;
+  fixed cache completion checks, walk gating and transcript response filtering.
+
 ## 0.4.1 — 2026-09-02
 
 Second pass: four Codex (gpt-5.5) reviews on top of the four Claude ones (`docs/reviews/2026-09-02-codex-*.md`).
@@ -58,6 +83,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Fixed — 2026-09-11
+
+- MCP startup now supplies core chat and voice-archive instructions. Tool guidance uses `voice_note_transcript` for `voice`/`audio` rows, separates saved audio from transcripts, and distinguishes missing history, missing keys and unsupported media.
+- The Python response filter now checks voice transcripts as well as typed message text. It preserves missing/null/empty transcript values and combines flags; stored originals and the known-phrase pattern list are unchanged.
+- History responses preserve the bridge's mode-specific hint and append sent-versus-received guidance even when a hint already exists. Receipt fields, older/newest checks, active-walk errors and the REST-only status route are documented.
+- Older-history walk registration with `walk=True` checks and replaces stale unanswered registrations for the contact under one lock. Fresh alias-equivalent requests still receive a conflict. Expiry occurs at the request gate, not on a timer.
+- Media downloads report `cached_hit` from the branch that reused bytes, instead of inferring it from an old path. Empty cache files are retried; empty downloads are rejected.
+- Added the chat-analysis workflow with audio validation, transcript provenance, resumable manifests and keyboard-safe recovery steps. Python behavior tests cover the initialization handshake, transcript filtering, history mapping/hints and media errors.
 
 ## [0.4.1] - 2026-08-25
 

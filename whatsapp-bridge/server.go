@@ -78,6 +78,8 @@ func (s *Server) registerRoutes() {
 	// Python consumer) materialize a single message's bytes without
 	// flipping the global WHATSAPP_AUTO_DOWNLOAD_MEDIA flag.
 	s.mux.HandleFunc("POST /api/media/download", s.handleDownloadMedia)
+	s.mux.HandleFunc("GET /api/native/messages", s.handleNativeMessages)
+	s.mux.HandleFunc("POST /api/native/voice/recover", s.handleRecoverNativeVoice)
 
 	// On-demand history-sync request. Asks WhatsApp for older messages in
 	// a chat so processHistorySyncEvent can backfill media-key fields.

@@ -1,3 +1,21 @@
+# WhatsApp MCP — upgraded fork 0.5.0
+
+This fork adds background recovery of older voice notes and a Google Drive
+archive for occasional, narrowly scoped chat consultations. Install from
+`jonetto1978/whatsapp-mcp`; upstream packages do not contain these additions.
+
+- [Install this fork](SETUP.md) — use the source build for 0.5.0 until matching fork binaries are published.
+- [Drive archive setup](google-drive-mcp-server/README.md) — normal files, explicit dates, bounded reads, no WhatsApp connection needed for saved chats.
+- [Consultation rules](docs/CHAT_ARCHIVES.md) — only selected chats and periods; older history requires an explicit request.
+- [Native recovery](docs/NATIVE_RECOVERY.md) — requires a compatible copy of the Mac app database; no screen control.
+
+Both Python components include `uv.lock`; use `uv run --frozen` to keep the
+recorded dependency versions. Configuration, credentials, chat records and
+media stay outside Git. Source and tests cover macOS, Windows and Linux paths;
+platform support does not mean every native app's database format is supported.
+
+The upstream author and license are retained below.
+
 # whatsapp-mcp
 
 
@@ -46,22 +64,28 @@ Claude can:
 - Resolve LID (Linked IDentifier) names instead of numeric placeholders
 - Send text messages, reactions, and reply-quotes, with a mandatory `confirm_send` step between draft and delivery
 - Pull matching CRM context from your Obsidian vault when reading a chat
-- See only prompt-injection-scrubbed message text, never raw adversarial input
+- Read message text and voice transcripts with known injection phrases redacted; the filter is limited, so all incoming content remains untrusted
 
-Everything runs locally on your machine. No cloud sync. No telemetry. Optional OpenAI Whisper backend is opt-in, off by default.
+The WhatsApp bridge runs locally. The optional Drive companion writes only requested content to the configured Google Drive account. OpenAI speech recognition is opt-in and off by default. The inherited install hook is documented below.
+
+For chat reviews and voice archives, follow the [chat analysis workflow](docs/CHAT_ANALYSIS_WORKFLOW.md).
+It separates message history, saved audio and transcripts, and covers older-media recovery without interrupting the user's keyboard.
+The MCP initialization instructions and tool descriptions also carry the core rules, including the `voice_note_transcript` field and sent-versus-received history status.
 
 ## Architecture
 
-Two components, both local:
+Two local WhatsApp components and an optional Drive companion:
 
 - **`whatsapp-bridge/`** (Go). Binds to 127.0.0.1 only. Wraps `whatsmeow` for the WhatsApp Web multidevice protocol. Owns SQLite persistence with SQLCipher encryption. Handles QR and pairing-code auth (live-refreshing terminal QR with Windows-safe rendering, plus a headless auth API — `GET /api/auth/qr`, `POST /api/auth/pair-phone`, `POST /api/auth/reconnect` — so a GUI or supervisor can drive pairing without a terminal), media up/download, session recovery from `StreamReplaced` conflicts, call history capture. Exposes a REST API the Python MCP layer consumes.
-- **`whatsapp-mcp-server/`** (Python, FastMCP). Consumes the Go bridge REST API. Exposes 11 MCP tools to Claude: full read surface (chats, messages, contacts), accent-insensitive search, presence (typing, online, mark-read), and text-send + reactions + reply-quotes with mandatory `confirm_send`. Runs via `uv` and stdio transport.
+- **`whatsapp-mcp-server/`** (Python, FastMCP). Consumes the Go bridge REST API. Exposes 16 MCP tools to Claude: chat/contact reads, native older-history and voice recovery, accent-insensitive search, presence (typing, online, mark-read), and text-send + reactions + reply-quotes with mandatory `confirm_send`. Runs via `uv` and stdio transport.
+
+- **`google-drive-mcp-server/`** (Python). Thirteen tools for user-owned Drive files, monthly chat archives, bounded date/text queries, uploads and readback. It can run without the WhatsApp bridge.
 
 ## Install
 
 Open Claude Code, paste:
 
-    /plugin marketplace add adelaidasofia/whatsapp-mcp
+    /plugin marketplace add jonetto1978/whatsapp-mcp
     /plugin install whatsapp-mcp@whatsapp-mcp
 
 This installs the Python MCP server side. The Go bridge still needs the one-time QR pairing flow with your phone — see the legacy install block below for those steps.
@@ -94,6 +118,7 @@ Key variables:
 | `WHATSAPP_BRIDGE_PORT` | `8080` | Go bridge REST API port |
 | `WHATSAPP_DB_PATH` | `$HOME/.claude/whatsapp-mcp/store/messages.db` | Encrypted SQLite database |
 | `WHATSAPP_MEDIA_PATH` | `$HOME/.claude/whatsapp-mcp/media/` | Media file storage |
+| `WHATSAPP_NATIVE_DB_PATH` | Mac app's `ChatStorage.sqlite` on macOS | Optional absolute path for the read-only native chat source; no screen control |
 | `WHATSAPP_VAULT_CRM_PATH` | empty | Absolute path to your vault CRM folder for auto-injection (e.g., Obsidian `👤 CRM/`). When unset, CRM injection is disabled. |
 | `WHATSAPP_WHISPER_BACKEND` | `off` | `off` (zero-config boot), `local-cpp` (private, needs a whisper model), or `openai-api` (opt-in) |
 | `WHATSAPP_WHISPER_API_KEY` | empty | Required only when backend is `openai-api` |
@@ -102,6 +127,14 @@ Key variables:
 | `WHATSAPP_AUDIT_LOG` | `true` | Log every tool call to `audit.log` |
 | `WHATSAPP_ENCRYPT_DB` | `true` | Enable SQLCipher DB encryption; key in the platform secret store (macOS Keychain / Windows Credential Manager / libsecret) |
 | `WHATSAPP_DB_KEY` | empty | Explicit 64-hex-char SQLCipher key override (skips the platform store). Escape hatch for headless/CI/custom secret managers, and the recovery path when the secret store cannot be read — see below |
+
+### Recover older chats and voice notes
+
+Use `list_native_messages` when the bridge has less history than the WhatsApp
+Mac app. Use `recover_voice_note` for verified audio and transcripts, including
+phone re-upload requests for expired media. Both are MCP tools and need no
+screen control or keyboard input. See [native recovery](docs/NATIVE_RECOVERY.md)
+for pending states, source limits and configuration.
 
 ### The DB key and `WHATSAPP_DB_KEY`
 

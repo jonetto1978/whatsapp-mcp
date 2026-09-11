@@ -1,5 +1,11 @@
 # Setup
 
+This fork is version 0.5.0. Use **Path B (build from source)** for the new native
+recovery and Drive archive tools until matching fork release binaries are published.
+Older upstream downloads and the upstream PyPI package do not contain these changes.
+The optional [Drive companion](google-drive-mcp-server/README.md) reads saved chats
+on macOS, Windows and Linux. Native recovery still needs a compatible Mac database.
+
 Step-by-step install for macOS, Windows, and Linux.
 
 Two paths to a running bridge:
@@ -11,7 +17,7 @@ Either way you'll also need **Python 3.11+** and **uv** for the MCP server layer
 
 ## 1a. Path A — download the prebuilt bridge
 
-Grab the binary for your OS from the [latest release](https://github.com/adelaidasofia/whatsapp-mcp/releases/latest) (releases v0.2.0 and newer carry binaries + SHA256 files):
+Grab the binary for your OS from the [latest release](https://github.com/jonetto1978/whatsapp-mcp/releases/latest) (releases v0.2.0 and newer carry binaries + SHA256 files):
 
 - `whatsapp-bridge-darwin-arm64` — macOS (Apple Silicon)
 - `whatsapp-bridge-darwin-amd64` — macOS (Intel)
@@ -22,7 +28,7 @@ Clone the repo anyway (it carries `.env.example` and the MCP server), then drop 
 
 ```bash
 # macOS / Linux
-git clone https://github.com/adelaidasofia/whatsapp-mcp.git "$HOME/.claude/whatsapp-mcp"
+git clone https://github.com/jonetto1978/whatsapp-mcp.git "$HOME/.claude/whatsapp-mcp"
 mkdir -p "$HOME/.claude/whatsapp-mcp/whatsapp-bridge/bin"
 mv ~/Downloads/whatsapp-bridge-* "$HOME/.claude/whatsapp-mcp/whatsapp-bridge/bin/whatsapp-bridge"
 chmod +x "$HOME/.claude/whatsapp-mcp/whatsapp-bridge/bin/whatsapp-bridge"
@@ -30,7 +36,7 @@ chmod +x "$HOME/.claude/whatsapp-mcp/whatsapp-bridge/bin/whatsapp-bridge"
 
 ```powershell
 # Windows PowerShell
-git clone https://github.com/adelaidasofia/whatsapp-mcp.git "$env:USERPROFILE\.claude\whatsapp-mcp"
+git clone https://github.com/jonetto1978/whatsapp-mcp.git "$env:USERPROFILE\.claude\whatsapp-mcp"
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\whatsapp-mcp\whatsapp-bridge\bin" | Out-Null
 Move-Item "$env:USERPROFILE\Downloads\whatsapp-bridge-windows-amd64.exe" "$env:USERPROFILE\.claude\whatsapp-mcp\whatsapp-bridge\bin\whatsapp-bridge.exe"
 ```
@@ -95,14 +101,14 @@ powershell -ExecutionPolicy ByPass -File scripts\check_prerequisites.ps1
 
 ```bash
 # macOS / Linux
-git clone https://github.com/adelaidasofia/whatsapp-mcp.git "$HOME/.claude/whatsapp-mcp"
+git clone https://github.com/jonetto1978/whatsapp-mcp.git "$HOME/.claude/whatsapp-mcp"
 cd "$HOME/.claude/whatsapp-mcp/whatsapp-bridge"
 go build -o bin/whatsapp-bridge .
 ```
 
 ```powershell
 # Windows PowerShell (note the .exe — Go appends it on Windows)
-git clone https://github.com/adelaidasofia/whatsapp-mcp.git "$env:USERPROFILE\.claude\whatsapp-mcp"
+git clone https://github.com/jonetto1978/whatsapp-mcp.git "$env:USERPROFILE\.claude\whatsapp-mcp"
 cd "$env:USERPROFILE\.claude\whatsapp-mcp\whatsapp-bridge"
 go build -o bin\whatsapp-bridge.exe .
 ```
@@ -226,12 +232,12 @@ Use the CLI. One command, no JSON to hand-edit:
 
 ```bash
 # macOS / Linux
-claude mcp add whatsapp --scope user -- uv --directory "$HOME/.claude/whatsapp-mcp/whatsapp-mcp-server" run main.py
+claude mcp add whatsapp --scope user -- uv --directory "$HOME/.claude/whatsapp-mcp/whatsapp-mcp-server" run --frozen main.py
 ```
 
 ```powershell
 # Windows PowerShell
-claude mcp add whatsapp --scope user -- uv --directory "$env:USERPROFILE\.claude\whatsapp-mcp\whatsapp-mcp-server" run main.py
+claude mcp add whatsapp --scope user -- uv --directory "$env:USERPROFILE\.claude\whatsapp-mcp\whatsapp-mcp-server" run --frozen main.py
 ```
 
 Then restart Claude Code and confirm with `/mcp` — you should see `whatsapp`
@@ -247,7 +253,7 @@ you did, or you want vault CRM injection, add them with `--env` placed after the
 server name and before `--`:
 
 ```bash
-claude mcp add whatsapp --scope user --env WHATSAPP_BRIDGE_PORT=8090 -- uv --directory "$HOME/.claude/whatsapp-mcp/whatsapp-mcp-server" run main.py
+claude mcp add whatsapp --scope user --env WHATSAPP_BRIDGE_PORT=8090 -- uv --directory "$HOME/.claude/whatsapp-mcp/whatsapp-mcp-server" run --frozen main.py
 ```
 
 > Why the CLI rather than the JSON below: writing to `.mcp.json` /
@@ -272,6 +278,7 @@ If you would rather edit the file directly, add this block to your project
         "--directory",
         "/Users/YOUR_USERNAME/.claude/whatsapp-mcp/whatsapp-mcp-server",
         "run",
+        "--frozen",
         "main.py"
       ],
       "env": {

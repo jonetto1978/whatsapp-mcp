@@ -6,12 +6,23 @@
         "--directory",
         "${CLAUDE_PLUGIN_ROOT}/whatsapp-mcp-server",
         "run",
+        "--frozen",
         "main.py"
       ],
       "env": {
         "WHATSAPP_BRIDGE_HOST": "127.0.0.1",
         "WHATSAPP_BRIDGE_PORT": "8080"
       }
+    },
+    "google-drive-archive": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}/google-drive-mcp-server",
+        "run",
+        "--frozen",
+        "server.py"
+      ]
     }
   }
 }

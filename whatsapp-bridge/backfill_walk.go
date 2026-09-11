@@ -38,6 +38,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -204,6 +205,63 @@ func (w *backfillWalker) beginModeID(chatJID string, anchorTS int64, anchorID st
 		maxRounds: maxRounds,
 	}
 	return true
+}
+
+// claimOlderWalk is the request gate for an API-initiated "older" walk. Under
+// ONE lock it (1) expires any registration among keys whose last request went
+// unanswered for longer than walkStaleAfter, (2) refuses with errWalkActive if
+// a fresh registration remains under any key, (3) raises the global budget by
+// maxRounds so the walk is not starved by earlier sweeps, and (4) registers
+// the walk under chatJID.
+//
+// Why one lock. RequestOlderHistory used to do these as separate calls
+// (anyActive, extendBudget, beginModeID), so two concurrent API requests for
+// the same contact could both pass the active check and both register, the
+// second silently overwriting the first's cursor. And nothing on the request
+// path ever called sweepStale, which only ran when some history chunk arrived
+// or a repair sweep reset everything — so a walk whose request WhatsApp never
+// answered stayed registered indefinitely and every later request got 409
+// (Fable review, 2026-09-10, finding B1).
+//
+// Expiry is bounded to keys: only registrations for THIS contact (its JID and
+// aliases) are released, so a stale repair walk on another chat is left for the
+// next chunk-arrival sweep exactly as before. Expiry is driven by the request,
+// not by a timer.
+func (w *backfillWalker) claimOlderWalk(keys []string, chatJID string, anchorTS int64, anchorID string, perChat, maxRounds int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	for _, k := range keys {
+		st, ok := w.chats[k]
+		if !ok {
+			continue
+		}
+		if now.Sub(st.lastReqAt) > walkStaleAfter {
+			w.stopped["unanswered"]++
+			delete(w.chats, k)
+			log.Printf("backfill walk: %s expired an unanswered walk (last request %s ago)", k, now.Sub(st.lastReqAt).Round(time.Second))
+			continue
+		}
+		return errWalkActive
+	}
+	if maxRounds > 0 && w.spent+maxRounds > w.budget {
+		w.budget = w.spent + maxRounds
+	}
+	if w.spent >= w.budget {
+		w.stopped["global_budget"]++
+		return errors.New("walk budget exhausted")
+	}
+	w.spent++
+	w.chats[chatJID] = &walkState{
+		rounds:    1,
+		anchorTS:  anchorTS,
+		anchorID:  anchorID,
+		lastReqAt: now,
+		perChat:   perChat,
+		mode:      "older",
+		maxRounds: maxRounds,
+	}
+	return nil
 }
 
 // extendBudget raises the global budget by n so an ad-hoc walk started from

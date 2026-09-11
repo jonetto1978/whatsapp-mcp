@@ -33,7 +33,7 @@ dist/
 *.egg-info/
 .venv/
 .uv/
-uv.lock
+# Application lockfiles are tracked for repeatable installs.
 
 # Whisper models (large binaries, downloaded separately)
 models/
@@ -73,3 +73,8 @@ store/bridge.token
 
 # machine-local search index (regenerated)
 .memsearch/
+
+# Google OAuth clients and tokens always stay outside source control.
+credentials.json
+gcp-oauth.keys.json
+settings.json

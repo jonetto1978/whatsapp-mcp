@@ -26,6 +26,17 @@ This MCP reads and writes your personal WhatsApp. Treat it as equivalent to your
 
 ## Hardening decisions
 
+Native recovery adds two background MCP routes: `list_native_messages` reads
+the configured Mac chat database with SQLite `mode=ro`; `recover_voice_note`
+can ask the user's linked phone to re-upload an expired media file and can use
+the configured transcription backend. Both routes use the existing API token
+and origin guards. Tool arguments contain chat/message IDs, not filesystem
+paths, keys or signed media locations. Native keys stay inside the bridge.
+Audio is hash-checked and fully decoded before it is counted as recovered.
+Retained audio and transcript sidecars are private plaintext files (0700
+directories, 0600 files), not part of the encrypted message database. No screen
+control is used. See [native recovery](docs/NATIVE_RECOVERY.md) for states and limits.
+
 1. **Bridge binds to `127.0.0.1` only, never `0.0.0.0`.** Enforced in the Go bridge config loader; a startup check rejects any non-loopback bind address.
 
 2. **SQLite encrypted at rest with SQLCipher.** The master key is derived from a macOS Keychain entry (`service=whatsapp-mcp`, `account=default`). On first run, a random 256-bit key is generated and stored in Keychain; the user is prompted to authorize access. Since 0.4.1 the key reaches `security` over stdin, never as a command-line argument, so it is not visible in the process list during creation, and the item is read back and compared before the bridge trusts it. The DB file is unreadable without the key, even if the file itself is copied off the machine.

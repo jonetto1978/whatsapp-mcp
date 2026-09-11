@@ -1,13 +1,13 @@
 [project]
 name = "adelaidasofia-whatsapp-mcp"
-version = "0.4.1"
+version = "0.5.0"
 description = "Python MCP server for whatsapp-mcp. Consumes the Go bridge REST API and exposes tools to Claude."
 # readme: inline text + Homepage link in [project.urls] below. The full README
 # at the repo root cannot be referenced via `readme = "../README.md"` because
 # setuptools 77+ rejects file refs outside the package root (see
 # docs/TROUBLESHOOTING.md "uv sync fails on the Python MCP server"). The
 # publish pipeline includes its own staging; this field is what local CI sees.
-readme = { text = "Python MCP server for whatsapp-mcp. The Go bridge ships separately; see the full README at https://github.com/adelaidasofia/whatsapp-mcp for install + threat model + tool reference.", content-type = "text/markdown" }
+readme = { text = "Python MCP server for whatsapp-mcp. The Go bridge ships separately; see the full README at https://github.com/jonetto1978/whatsapp-mcp for install + threat model + tool reference.", content-type = "text/markdown" }
 # Upper bound is deliberate and load-bearing: fastmcp and python-frontmatter
 # both stop declaring support at 3.13, and the CI matrix exercises exactly this
 # range. Without a bound, `uv run` picks the newest interpreter on the machine,
@@ -45,9 +45,9 @@ openai = ["openai>=1.30.0"]
 adelaidasofia-whatsapp-mcp = "main:main"
 
 [project.urls]
-Homepage = "https://github.com/adelaidasofia/whatsapp-mcp"
-Repository = "https://github.com/adelaidasofia/whatsapp-mcp"
-Issues = "https://github.com/adelaidasofia/whatsapp-mcp/issues"
+Homepage = "https://github.com/jonetto1978/whatsapp-mcp"
+Repository = "https://github.com/jonetto1978/whatsapp-mcp"
+Issues = "https://github.com/jonetto1978/whatsapp-mcp/issues"
 
 [build-system]
 requires = ["setuptools>=68"]

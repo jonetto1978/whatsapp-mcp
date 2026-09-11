@@ -1,22 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.adelaidasofia/whatsapp-mcp",
+  "name": "io.github.jonetto1978/whatsapp-mcp",
   "title": "Personal WhatsApp MCP for Claude, built directly on whatsmeow",
   "description": "Personal WhatsApp MCP for Claude, built directly on whatsmeow. Encrypted-at-rest storage, Whisper\u2026",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "repository": {
-    "url": "https://github.com/adelaidasofia/whatsapp-mcp",
+    "url": "https://github.com/jonetto1978/whatsapp-mcp",
     "source": "github"
-  },
-  "packages": [
-    {
-      "registryType": "mcpb",
-      "identifier": "https://github.com/adelaidasofia/whatsapp-mcp/releases/download/v0.1.0/whatsapp-mcp.mcpb",
-      "version": "0.1.0",
-      "transport": {
-        "type": "stdio"
-      },
-      "fileSha256": "be3e354e0fd78b51d31df996c59a98375b9aa192c5114de4a537e9a7e0b04186"
-    }
-  ]
+  }
 }

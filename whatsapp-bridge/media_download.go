@@ -146,7 +146,14 @@ func extractDownloadableFieldsFromProto(m *waE2E.Message) (mediaFields, bool) {
 //
 // Idempotent: if the message already has a non-NULL media_path that exists
 // on disk, returns the existing path without re-downloading.
-func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mimeType string, size int64, err error) {
+//
+// cached reports that the returned bytes were served from the existing file on
+// disk rather than fetched now. It is the ONLY source of truth for the REST
+// cached_hit flag: the handler used to infer it from "the stored media_path
+// equals the returned path", which is also true after a deleted file was
+// re-downloaded to the same deterministic name (Fable review, 2026-09-10,
+// finding B3).
+func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mimeType string, size int64, cached bool, err error) {
 	var (
 		msgType                         string
 		mediaPath                       sql.NullString
@@ -165,9 +172,9 @@ func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mim
 		&mediaEncSha, &mediaSha, &fileLength,
 		&mediaKeyTimestamp, &mediaMime); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", 0, fmt.Errorf("message not found: %s", messageID)
+			return "", "", 0, false, fmt.Errorf("message not found: %s", messageID)
 		}
-		return "", "", 0, fmt.Errorf("query message: %w", err)
+		return "", "", 0, false, fmt.Errorf("query message: %w", err)
 	}
 
 	mt := ""
@@ -179,23 +186,32 @@ func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mim
 	// if the stored path is still inside the media folder. A polluted or legacy
 	// messages.media_path must not turn download_media into "return any file
 	// on disk" (Codex review, 2026-09-02; hypothesis, closed anyway).
+	//
+	// A zero-byte file is not a cache hit either: it is what an interrupted
+	// write or a truncated copy leaves behind, and returning it as success
+	// would hand the caller an empty voice note with size 0 forever. Fall
+	// through and fetch again.
 	if mediaPath.Valid && mediaPath.String != "" {
 		if st, statErr := os.Stat(mediaPath.String); statErr == nil && !st.IsDir() {
-			if insideMediaDir(b.cfg.MediaPath, mediaPath.String) {
-				return mediaPath.String, mt, st.Size(), nil
+			switch {
+			case !insideMediaDir(b.cfg.MediaPath, mediaPath.String):
+				log.Printf("DownloadMedia: ignoring stored media_path outside the media folder for %s; re-downloading", messageID)
+			case st.Size() == 0:
+				log.Printf("DownloadMedia: stored media_path for %s is an empty file; re-downloading", messageID)
+			default:
+				return mediaPath.String, mt, st.Size(), true, nil
 			}
-			log.Printf("DownloadMedia: ignoring stored media_path outside the media folder for %s; re-downloading", messageID)
 		}
 	}
 
 	if len(mediaKey) == 0 {
-		return "", "", 0, fmt.Errorf("media key not available for message %s (likely received before media-key persistence patch)", messageID)
+		return "", "", 0, false, fmt.Errorf("media key not available for message %s (likely received before media-key persistence patch)", messageID)
 	}
 
 	dl, err := buildDownloadable(msgType, mediaKey, mediaEncSha, mediaSha,
 		mediaURL, directPath, fileLength, mediaKeyTimestamp, mt)
 	if err != nil {
-		return "", "", 0, err
+		return "", "", 0, false, err
 	}
 
 	// Bridge-side ceiling on inbound media. whatsmeow buffers the whole blob in
@@ -204,23 +220,28 @@ func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mim
 	// (Codex review, 2026-09-02). The row's own declared length is checked
 	// first so an oversized item is refused without a network round-trip.
 	if fileLength.Valid && fileLength.Int64 > maxInboundMediaBytes {
-		return "", "", 0, fmt.Errorf("media for %s declares %d bytes; bridge cap is %d", messageID, fileLength.Int64, maxInboundMediaBytes)
+		return "", "", 0, false, fmt.Errorf("media for %s declares %d bytes; bridge cap is %d", messageID, fileLength.Int64, maxInboundMediaBytes)
 	}
-	bytes, err := b.client.Download(ctx, dl)
+	bytes, err := downloadMediaBytes(ctx, b, dl)
 	if err != nil {
-		return "", "", 0, fmt.Errorf("whatsmeow download: %w", err)
+		return "", "", 0, false, fmt.Errorf("whatsmeow download: %w", err)
 	}
 	if len(bytes) > maxInboundMediaBytes {
-		return "", "", 0, fmt.Errorf("media for %s is %d bytes; bridge cap is %d", messageID, len(bytes), maxInboundMediaBytes)
+		return "", "", 0, false, fmt.Errorf("media for %s is %d bytes; bridge cap is %d", messageID, len(bytes), maxInboundMediaBytes)
+	}
+	// An empty payload is a failed fetch, not a file. Writing it would create
+	// exactly the zero-byte cache entry the fast path above has to skip.
+	if len(bytes) == 0 {
+		return "", "", 0, false, fmt.Errorf("whatsmeow download: empty payload for %s", messageID)
 	}
 
 	if err := os.MkdirAll(b.cfg.MediaPath, 0o700); err != nil {
-		return "", "", 0, fmt.Errorf("mkdir media path: %w", err)
+		return "", "", 0, false, fmt.Errorf("mkdir media path: %w", err)
 	}
 	ext := extensionForMime(mt, msgType)
 	outPath := filepath.Join(b.cfg.MediaPath, safeMediaStem(messageID)+ext)
 	if err := os.WriteFile(outPath, bytes, 0o600); err != nil {
-		return "", "", 0, fmt.Errorf("write media file: %w", err)
+		return "", "", 0, false, fmt.Errorf("write media file: %w", err)
 	}
 
 	if _, perr := b.db.ExecContext(ctx,
@@ -231,7 +252,14 @@ func (b *Bridge) DownloadMedia(ctx context.Context, messageID string) (path, mim
 		log.Printf("DownloadMedia: persist media_path failed for %s: %v", messageID, perr)
 	}
 
-	return outPath, mt, int64(len(bytes)), nil
+	return outPath, mt, int64(len(bytes)), false, nil
+}
+
+// downloadMediaBytes is the network step of DownloadMedia, held in a variable
+// so the cache/re-download/empty-payload branches can be tested with synthetic
+// bytes and no paired client. Production never reassigns it.
+var downloadMediaBytes = func(ctx context.Context, b *Bridge, dl whatsmeow.DownloadableMessage) ([]byte, error) {
+	return b.client.Download(ctx, dl)
 }
 
 // buildDownloadable reconstitutes the right whatsmeow proto message for the
@@ -406,16 +434,10 @@ func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var preMediaPath sql.NullString
-	_ = s.db.QueryRowContext(r.Context(),
-		`SELECT media_path FROM messages WHERE id = ?`,
-		body.MessageID,
-	).Scan(&preMediaPath)
-
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	path, mt, size, err := s.bridge.DownloadMedia(ctx, body.MessageID)
+	path, mt, size, cached, err := s.bridge.DownloadMedia(ctx, body.MessageID)
 	if err != nil {
 		errMsg := err.Error()
 		switch {
@@ -429,7 +451,6 @@ func (s *Server) handleDownloadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cached := preMediaPath.Valid && preMediaPath.String == path && size > 0
 	writeJSON(w, http.StatusOK, downloadMediaResponse{
 		MessageID: body.MessageID,
 		Path:      path,

@@ -442,22 +442,21 @@ func (b *Bridge) RequestOlderHistory(ctx context.Context, chatJID string, count 
 	}
 	a.MaxRounds = maxRounds
 	// Register the walk BEFORE sending, so the chunk's delivery finds it.
+	// claimOlderWalk expires a stale (unanswered past walkStaleAfter)
+	// registration for this contact, refuses a fresh one, and registers —
+	// all under one lock, so concurrent requests cannot double-register.
 	registered := false
 	if walk && b.walker != nil {
 		keys := []string{a.ChatJID}
 		if al, aerr := resolveAliases(ctx, b.db, a.ChatJID); aerr == nil {
 			keys = al
 		}
-		if b.walker.anyActive(keys) {
-			return a, resp, errWalkActive
-		}
-		b.walker.extendBudget(maxRounds)
-		if !b.walker.beginModeID(a.ChatJID, a.TS, a.ID, count, "older", maxRounds) {
-			return a, resp, errors.New("walk budget exhausted")
+		if cerr := b.walker.claimOlderWalk(keys, a.ChatJID, a.TS, a.ID, count, maxRounds); cerr != nil {
+			return a, resp, cerr
 		}
 		registered = true
 	}
-	resp, err = b.RequestHistoryBefore(ctx, a.ChatJID, a.ID, a.TS, a.FromMe, count)
+	resp, err = sendHistoryBefore(b, ctx, a.ChatJID, a.ID, a.TS, a.FromMe, count)
 	if err != nil && registered {
 		// A walk whose first request never left must not stay registered:
 		// a later unsolicited chunk would otherwise resume stepping.
@@ -469,6 +468,12 @@ func (b *Bridge) RequestOlderHistory(ctx context.Context, chatJID string, count 
 // errWalkActive is returned when a backwards walk is already running for the
 // chat; the handler maps it to 409 so the caller does not double-spend.
 var errWalkActive = errors.New("a history walk is already active for this chat; wait for it to stop")
+
+// sendHistoryBefore is the send step of RequestOlderHistory, held in a variable
+// so the request GATE (anchor lookup, stale expiry, alias conflict, budget,
+// registration) can be tested without a paired client or WhatsApp traffic.
+// Production never reassigns it.
+var sendHistoryBefore = (*Bridge).RequestHistoryBefore
 
 // RequestHistoryBefore asks WhatsApp for the `count` messages immediately
 // before an EXPLICIT anchor, rather than before the newest row we hold.

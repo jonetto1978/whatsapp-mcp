@@ -19,7 +19,6 @@ import pytest
 
 from main import lookup_crm_context
 
-
 # --- Fixtures -----------------------------------------------------------------
 
 

@@ -44,6 +44,18 @@ or no progress. The MCP tool exposes `direction`, `walk`, `max_rounds`. Measured
 history began that morning walked back to March in three rounds (50 + 50 + 23 rows) and stopped on `no_progress`.
 `anchor: "newest"` keeps the old media-key behaviour.
 
+## History request sent, but older voice files are still missing
+
+**Observed distinction.** A connected, authenticated bridge can contain less chat history than the native WhatsApp app. The history endpoint confirms that a request was sent; it does not confirm receipt. The case above, where a chunk arrived with no new rows, differs from a request for which no chunk has arrived.
+
+**Check.** Save the receipt's `sent_message_id`, `sent_at_unix`, `anchor_message`, `requested_count` and, when present, `anchor_ts`, `anchor_chat_jid`, `walk` and `max_rounds`. There is no `request_id` field; get aliases from `search_contacts` / `list_messages`. Inspect new messages, bridge logs and the REST-only `GET /api/admin/backfill-decode/status`. That status gives global walk counters, not a per-request completion result. Do not use `POST /api/admin/backfill-decode` to check progress: it resets pending API walks. A polling timeout alone is not a reason to start another walk or reset a signed-in session.
+
+**Pending and missing anchors.** A `409` means a walk is still registered for the chat or an alias. Stale cleanup is event-driven, not a timer: the local fix checks for unanswered stale walks when a later explicit older-history request with `walk=True` reaches its walk gate. Time passing alone does not prove release or history completion. A `500` with `no existing messages for chat` means no stored message can serve as the anchor; requesting again cannot start from an empty chat store.
+
+**Recover through MCP.** `download_media` supports `voice` and `audio`, including rows with `voice_note_transcript`. Audio rows have empty `content_text`; read the transcript field separately. Its `404` errors distinguish `message not found`, `media key not available` and `is not downloadable`. For records absent from the bridge but present in the Mac app, use `list_native_messages`, then `recover_voice_note`. That tool verifies native/cache bytes or fetches media and asks the linked phone to re-upload an expired file. It also returns transcripts from the configured speech backend. Repeat active jobs with `retry=false`; a sent phone request is not proof of recovery. This path uses no screen control or keyboard input. See [native recovery](NATIVE_RECOVERY.md).
+
+See the [complete workflow](CHAT_ANALYSIS_WORKFLOW.md) for MCP routing, source limits, file checks and exact completion counts.
+
 ## Contact's recent messages look "silent" / search returns no history
 
 **Symptom.** A contact you've definitely been messaging shows no recent messages, or `search_contacts` returns the contact but `list_messages` for that JID is empty.
