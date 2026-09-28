@@ -1,7 +1,7 @@
 # Google Drive chat archives
 
-This companion exposes 13 tools for normal Google Drive files and bounded chat
-reads. It uses the selected user's OAuth account, not a service account. It
+This companion exposes 16 tools for Google Drive files, native Google Sheets and
+bounded chat reads. It uses the selected user's OAuth account, not a service account. It
 runs with Python 3.11–3.13 on macOS, Linux and Windows; `tzdata` supplies timezones
 on systems without the operating system's timezone database. No WhatsApp
 bridge, native Mac app or vector database is required to read saved chats.
@@ -15,7 +15,9 @@ uv --directory google-drive-mcp-server sync --frozen
 ```
 
 Get a Desktop OAuth client JSON from a Google Cloud project you control with
-the Google Drive API enabled. Configure its expected account and project:
+the Google Drive API enabled. For native spreadsheet reads and edits, also enable
+the Google Sheets API (`sheets.googleapis.com`) in that same project. Configure
+its expected account and project:
 
 ```text
 uv --directory google-drive-mcp-server run --frozen configure.py --email YOUR_EMAIL --project YOUR_PROJECT_ID --client-file ABSOLUTE_CLIENT_JSON_PATH
@@ -57,7 +59,34 @@ configuration and sign-in above. Tool definitions load on a fresh connection.
 
 `get_profile`, `search`, `list_folder`, `create_folder`, `get_file_metadata`,
 `read_text`, `read_chat_archive`, `download_file`, `copy_file`, `upload_file`,
-`update_file`, `create_text_file`, `trash_file`.
+`update_file`, `create_text_file`, `trash_file`, `get_spreadsheet_metadata`,
+`get_spreadsheet_cells`, `update_spreadsheet_cells`.
+
+## Native Google Sheets
+
+Use the same configured user OAuth account. Full Drive edit scope is accepted
+by the Sheets API; a separate service account or new credential file is not
+needed. The Google Sheets service must be enabled in the OAuth client's project.
+`SERVICE_DISABLED` means service setup is missing, not that file sharing is wrong.
+File ownership can differ from the signed-in account; the caller must have access
+to the specific spreadsheet, and writes check `canEdit`.
+
+1. Call `get_spreadsheet_metadata` with the native spreadsheet ID to resolve tabs.
+2. Read a bounded range such as `'Course tracker'!A2:A12` with
+   `get_spreadsheet_cells`. The response includes values, formulas, format, notes,
+   validation and a SHA-256 fingerprint of stored cells and coordinates.
+3. Call `update_spreadsheet_cells` with that exact range, an equally sized matrix
+   of literal values and the last-read `expected_sha256`. Preserve existing text
+   in the value matrix when adding a status to a teacher's note.
+4. Require `verified: true`. The tool reads back the save and checks stored values,
+   notes and format. A timeout or differing read-back needs another read before a
+   retry. The fingerprint is a stale-write guard, not an atomic compare-and-swap.
+
+Ranges are limited to 2,000 cells; writes to 50,000 characters. Strings are literal,
+including those beginning with `=`; null or an empty string clears the cell value.
+The value tool does not replace formulas, validation rules, chips or rich text,
+change layout, create tabs or change sharing. Use another explicit workflow when
+those structures must be edited. Tool definitions appear on a fresh MCP connection.
 
 See [the archive workflow](../docs/CHAT_ARCHIVES.md). `create_folder` reuses a
 unique matching child. `read_chat_archive` reads only the selected saved chat
@@ -74,10 +103,13 @@ tool. `trash_file` is reversible. Normal content files have no added encryption.
 
 ```text
 uv --directory google-drive-mcp-server run --frozen python -m unittest -v test_chat_archive.py
+uv --directory google-drive-mcp-server run --frozen python -m unittest -v test_sheets.py
 uv --directory google-drive-mcp-server run --frozen ruff check .
 ```
 
 Unit checks exercise date limits, output budgets, opt-in voice text, pagination,
 scope-bound cursors, content hashes and empty periods without network access.
+Sheet checks cover bounded ranges, stale reads, preserved neighboring formulas,
+literal values, read-back failures and uncertain writes without blind retries.
 Live operation still requires valid Drive permissions. A saved archive is not
 evidence that deleted or unsynced WhatsApp history was recovered.
