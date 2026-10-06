@@ -43,7 +43,7 @@ func TestExtractContent_ProtocolCarrierStaysSilent(t *testing.T) {
 			MessageContextInfo:           &waE2E.MessageContextInfo{},
 		},
 	})
-	if text != "" || msgType != "system" {
+	if text != "[control: senderKeyDistributionMessage]" || msgType != "system" {
 		t.Fatalf("protocol-only message must stay a silent empty system row, got (%q, %q)", text, msgType)
 	}
 }
@@ -82,7 +82,11 @@ func TestExtractContent_ContentFreeStaysSystem(t *testing.T) {
 	}
 	for name, msg := range cases {
 		text, msgType := extractContent(&events.Message{Message: msg})
-		if msgType != "system" || text != "" {
+		want := ""
+		if name == "metadata only" {
+			want = "[control: messageContextInfo]"
+		}
+		if msgType != "system" || text != want {
 			t.Fatalf("%s: want (\"\", \"system\") unchanged, got (%q, %q)", name, text, msgType)
 		}
 	}
@@ -109,7 +113,8 @@ func TestBaileysExtractContent_ContentFreeStaysSystem(t *testing.T) {
 		"metadata only": {"messageContextInfo": map[string]any{}},
 	} {
 		text, msgType := baileysExtractContent(m)
-		if msgType != "system" || text != "" {
+		want := ""
+		if msgType != "system" || text != want {
 			t.Fatalf("%s: want (\"\", \"system\"), got (%q, %q)", name, text, msgType)
 		}
 	}

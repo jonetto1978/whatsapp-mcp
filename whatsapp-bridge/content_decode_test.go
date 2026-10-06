@@ -264,8 +264,8 @@ func TestCarrierOnlyMessageStaysSilent(t *testing.T) {
 	text, typ := extractContent(msgEvent(&waE2E.Message{
 		SenderKeyDistributionMessage: &waE2E.SenderKeyDistributionMessage{},
 	}))
-	if text != "" {
-		t.Errorf("text = %q, want empty: a protocol carrier must not write vault noise", text)
+	if text != "[control: senderKeyDistributionMessage]" {
+		t.Errorf("text = %q, want explicit control classification", text)
 	}
 	if typ != "system" {
 		t.Errorf("type = %q, want \"system\"", typ)

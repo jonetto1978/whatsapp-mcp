@@ -28,11 +28,12 @@ import (
 // lives in a separate SQLite file, both encrypted under the same SQLCipher key as the
 // message database. The split follows whatsmeow's upstream pattern; we just share the key.
 type Bridge struct {
-	cfg         *Config
-	db          *sql.DB
-	client      *whatsmeow.Client
-	clientLog   *clientErrLog
-	transcriber *Transcriber
+	cfg           *Config
+	db            *sql.DB
+	client        *whatsmeow.Client
+	clientLog     *clientErrLog
+	secretDecrypt func(context.Context, *events.Message) (*waE2E.Message, error)
+	transcriber   *Transcriber
 
 	// rootCtx is the process-lifetime context, kept so event handlers can
 	// restart the login loop (e.g. after a WhatsApp-side logout) without
@@ -337,12 +338,12 @@ func (b *Bridge) scheduleRelogin(reason string) {
 // The original content text is stored as-is; the prompt-injection-scrubbed representation
 // is stored in scrubbed_text (plus flags in scrub_flags_json) for Claude to consume.
 func (b *Bridge) onMessage(evt *events.Message) {
+	evt, content, msgType := b.decodeForStorage(evt)
 	chatJID := evt.Info.Chat.String()
 	senderJID := evt.Info.Sender.String()
 	id := evt.Info.ID
 	ts := evt.Info.Timestamp.Unix()
 
-	content, msgType := extractContent(evt)
 	normalized := Normalize(content)
 	scrubbed, flags := Scrub(content)
 
@@ -455,6 +456,12 @@ func (b *Bridge) onMessage(evt *events.Message) {
 		undecryptablePrefix+"%")
 	if err != nil {
 		log.Printf("onMessage: message insert failed: %v", err)
+	}
+
+	// A decoded retry may target an older empty/unsupported row too. Use the
+	// same guarded repair as history, without overwriting existing good text.
+	if _, err := b.backfillStoredContent(id, content, msgType); err != nil {
+		log.Printf("onMessage: content repair failed: %v", err)
 	}
 
 	// Upsert contact row for the sender (non-group messages; group participants sync separately).
@@ -674,6 +681,9 @@ func extractContentFromProto(raw *waE2E.Message) (text, msgType string) {
 		// to relabel a rare row. The marker is what every reader keys on
 		// (unsupportedRawType), and it is queryable:
 		//   SELECT * FROM messages WHERE content_text LIKE '[unsupported: %'
+		if control := controlMarker(m); control != "" {
+			return control, "system"
+		}
 		if raw := unsupportedMessageType(m); raw != "" {
 			log.Printf("extractContent: undecoded WhatsApp message type %q — stored with an explicit unsupported marker (no text captured; add a decoder if it carries user text)", raw)
 			return unsupportedMarker(raw), "system"

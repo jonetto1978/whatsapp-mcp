@@ -111,7 +111,7 @@ func (b *Bridge) listNativeMessages(ctx context.Context, jid, before string, lim
 		CAST(COALESCE(MAX(m.ZMESSAGEDATE)+978307200,0) AS INTEGER)`+from+" WHERE "+where, args...).Scan(
 		&out.TotalRecords, &out.TotalTextCharacters, &out.TotalAudioRecords, &out.OldestTimestamp, &out.NewestTimestamp)
 	if err != nil {
-		return nil, errors.New("unsupported or unreadable native chat schema")
+		return nil, fmt.Errorf("cannot read native chat schema: %w", err)
 	}
 	if before != "" {
 		var ts float64
@@ -130,7 +130,7 @@ func (b *Bridge) listNativeMessages(ctx context.Context, jid, before string, lim
 		" LEFT JOIN ZWAMEDIAITEM i ON i.Z_PK=m.ZMEDIAITEM WHERE " + where + " ORDER BY m.ZMESSAGEDATE DESC,m.Z_PK DESC LIMIT ?"
 	rows, err := db.QueryContext(ctx, query, append(args, limit+1)...)
 	if err != nil {
-		return nil, errors.New("unsupported or unreadable native chat schema")
+		return nil, fmt.Errorf("cannot read native chat schema: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {

@@ -1173,6 +1173,9 @@ func exportOneUnit(db *sql.DB, outputDir string, u exportUnit, todayStr string) 
 // it single; two copies of this switch would let the export and its auditor
 // disagree about what a complete vault looks like.
 func renderMessageText(msgType, text, transcript string) string {
+	if msgType == "system" && isControlText(text) {
+		return ""
+	}
 	switch msgType {
 	case "voice", "audio":
 		label := "[Voice note]"

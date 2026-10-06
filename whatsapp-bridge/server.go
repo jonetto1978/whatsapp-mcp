@@ -598,9 +598,18 @@ type messageRow struct {
 	Timestamp     int64   `json:"timestamp"`
 	Type          string  `json:"type"`
 	ContentText   string  `json:"content_text"`
+	ContentState  string  `json:"content_state,omitempty"`
 	IsFromMe      bool    `json:"is_from_me"`
 	Transcript    *string `json:"voice_note_transcript,omitempty"`
 	QuotedID      string  `json:"quoted_message_id,omitempty"`
+}
+
+// Additive classification lets MCP clients distinguish an unreadable body from
+// a positively identified control, without changing existing response fields.
+func (m messageRow) MarshalJSON() ([]byte, error) {
+	type plain messageRow
+	m.ContentState = contentState(m.Type, m.ContentText)
+	return json.Marshal(plain(m))
 }
 
 type messageListResponse struct {

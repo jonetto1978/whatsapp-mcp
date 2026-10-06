@@ -69,6 +69,9 @@ const rawTypeEmptySystem = "empty:system"
 //	empty `system` row               -> "empty:system"
 //	anything else                    -> ""
 func rawTypeForStorage(msgType, contentText string) string {
+	if msgType == "system" && isControlText(contentText) {
+		return ""
+	}
 	if mode := undecryptableFailMode(contentText); mode != "" {
 		return rawTypeNamespaceUndecryptable + mode
 	}

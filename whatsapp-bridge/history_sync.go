@@ -52,25 +52,7 @@ import (
 // delivery wraps it in HistorySyncMsg.GetMessage().GetMessage(). Both reach
 // the same *waE2E.Message, so both paths share this helper.
 func extractFromMessage(m *waE2E.Message) (mediaFields, bool) {
-	if m == nil {
-		return mediaFields{}, false
-	}
-	if mm := m.GetImageMessage(); mm != nil {
-		return fieldsFrom(mm), true
-	}
-	if mm := m.GetVideoMessage(); mm != nil {
-		return fieldsFrom(mm), true
-	}
-	if mm := m.GetDocumentMessage(); mm != nil {
-		return fieldsFrom(mm), true
-	}
-	if mm := m.GetAudioMessage(); mm != nil {
-		return fieldsFrom(mm), true
-	}
-	if mm := m.GetStickerMessage(); mm != nil {
-		return fieldsFrom(mm), true
-	}
-	return mediaFields{}, false
+	return extractDownloadableFieldsFromProto(m)
 }
 
 // processHistorySyncEvent updates messages.media_key for any rows currently
@@ -162,7 +144,20 @@ func (b *Bridge) processHistorySyncEvent(evt *events.HistorySync) {
 				continue
 			}
 
-			content, msgType := extractContentFromProto(wm.GetMessage())
+			chat, chatErr := types.ParseJID(chatJID)
+			if chatErr != nil {
+				continue
+			}
+			sender, _ := types.ParseJID(key.GetParticipant())
+			if key.GetFromMe() {
+				sender, _ = types.ParseJID(ownJID)
+			} else if sender.IsEmpty() {
+				sender = chat
+			}
+			historyEvent := &events.Message{Info: types.MessageInfo{MessageSource: types.MessageSource{
+				Chat: chat, Sender: sender, IsFromMe: key.GetFromMe(), IsGroup: chat.Server == types.GroupServer || chat.IsBroadcastList(),
+			}, ID: key.GetID()}, Message: wm.GetMessage()}
+			decodedEvent, content, msgType := b.decodeForStorage(historyEvent)
 			ts := int64(wm.GetMessageTimestamp())
 			fromMe := key.GetFromMe()
 
@@ -180,7 +175,7 @@ func (b *Bridge) processHistorySyncEvent(evt *events.HistorySync) {
 
 			normalized := Normalize(content)
 			scrubbed, flags := Scrub(content)
-			mfields, _ := extractFromMessage(wm.GetMessage())
+			mfields, _ := extractFromMessage(decodedEvent.Message)
 
 			// Insert the historical message. ON CONFLICT(id) DO NOTHING makes
 			// overlapping history chunks (and re-pairing) idempotent, and leaves
@@ -238,7 +233,7 @@ func (b *Bridge) processHistorySyncEvent(evt *events.HistorySync) {
 			// the media branch and must not share its `continue`: a recoverable
 			// row is usually not media-bearing at all — the common case is text
 			// that arrived inside an envelope the old switch could not see.
-			if n, err := b.backfillDecodedContent(key.GetID(), wm.GetMessage()); err != nil {
+			if n, err := b.backfillStoredContent(key.GetID(), content, msgType); err != nil {
 				log.Printf("history_sync: content backfill %s failed: %v", key.GetID(), err)
 			} else {
 				decoded += n
@@ -248,7 +243,7 @@ func (b *Bridge) processHistorySyncEvent(evt *events.HistorySync) {
 			// receives), still backfill the media fields via COALESCE — the
 			// file's original purpose. A no-op for the row we just inserted.
 
-			fields, ok := extractFromMessage(wm.GetMessage())
+			fields, ok := extractFromMessage(decodedEvent.Message)
 			if !ok || len(fields.MediaKey) == 0 {
 				continue
 			}
@@ -543,25 +538,10 @@ func (b *Bridge) RequestHistoryBefore(ctx context.Context, chatJID, anchorID str
 
 // --- MYC-3284 content backfill ---------------------------------------------
 
-// backfillDecodedContent re-decodes one history-sync message and repairs the
-// stored row if — and only if — that row was written empty by the pre-MYC-3284
-// decoder.
-//
-// The WHERE clause is the entire safety argument, so it is worth stating
-// plainly. A row is eligible only when BOTH hold:
-//
-//	type = 'system'                          the old catch-all bucket
-//	content_text IS NULL OR content_text=''  it actually has no payload
-//
-// So this can only ever turn a blank into something. It cannot overwrite text,
-// cannot touch a media row, and cannot disturb a row the current decoder wrote
-// (those carry either real text or an "[unsupported: …]" marker, and a marker
-// is non-empty). Overlapping history chunks are therefore idempotent, and a
-// stale re-delivery cannot clobber a fresher live row.
-//
-// A genuinely textless protocol carrier re-decodes to ("", "system") and the
-// UPDATE is a no-op write of identical values, which is the correct outcome:
-// key-distribution rows stay silent rather than gaining vault noise.
+// backfillDecodedContent repairs only missing content: empty system rows or
+// unsupported markers when a fresh delivery is genuinely decoded/classified.
+// Good text and media are immutable here. Repeated history remains idempotent;
+// a failure/unsupported marker cannot downgrade an existing marker or body.
 func (b *Bridge) backfillDecodedContent(msgID string, m *waE2E.Message) (int, error) {
 	if msgID == "" || m == nil {
 		return 0, nil
@@ -571,6 +551,10 @@ func (b *Bridge) backfillDecodedContent(msgID string, m *waE2E.Message) (int, er
 	// backfilled row is byte-identical to what it would have been had the
 	// message arrived today.
 	text, msgType := extractContentFromProto(m)
+	return b.backfillStoredContent(msgID, text, msgType)
+}
+
+func (b *Bridge) backfillStoredContent(msgID, text, msgType string) (int, error) {
 	if text == "" {
 		// Nothing recovered — leave the row exactly as it is rather than
 		// rewriting it with the same emptiness.
@@ -593,8 +577,9 @@ func (b *Bridge) backfillDecodedContent(msgID string, m *waE2E.Message) (int, er
 		       raw_type           = ?
 		 WHERE id = ?
 		   AND type = 'system'
-		   AND (content_text IS NULL OR content_text = '')
-	`, msgType, text, Normalize(text), scrubbed, ScrubFlagsJSON(flags), rawTypeNullable(msgType, text), msgID)
+		   AND (content_text IS NULL OR content_text = '' OR (content_text LIKE ? AND ?))
+	   AND COALESCE(content_text, '') <> ?
+	`, msgType, text, Normalize(text), scrubbed, ScrubFlagsJSON(flags), rawTypeNullable(msgType, text), msgID, unsupportedPrefix+"%", unsupportedRawType(text) == "" && undecryptableFailMode(text) == "", text)
 	if err != nil {
 		return 0, err
 	}

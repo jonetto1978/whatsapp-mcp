@@ -188,8 +188,8 @@ func TestHistorySyncAndLiveAgreeOnAContentFreeMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backfillDecodedContent: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("a content-free message must not rewrite the row; %d row(s) updated", n)
+	if n != 1 {
+		t.Fatalf("the historical carrier must gain its classification; %d row(s) updated", n)
 	}
 
 	liveType, liveText := parityRow(t, db, "live-empty")
@@ -198,7 +198,7 @@ func TestHistorySyncAndLiveAgreeOnAContentFreeMessage(t *testing.T) {
 		t.Fatalf("content-free message disagrees across writers:\n  live:    type=%q text=%q\n  history: type=%q text=%q",
 			liveType, liveText, histType, histText)
 	}
-	if liveType != "system" || liveText != "" {
+	if liveType != "system" || liveText != "[control: senderKeyDistributionMessage]" {
 		t.Fatalf("a protocol-only message must stay a silent empty system row, got (%q, %q)", liveType, liveText)
 	}
 }

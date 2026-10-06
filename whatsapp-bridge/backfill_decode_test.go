@@ -86,7 +86,7 @@ func TestBackfillNeverOverwritesExistingContent(t *testing.T) {
 	cases := []struct{ id, typ, content string }{
 		{"keep-text", "text", "a real message that must survive"},
 		{"keep-image", "image", "a caption"},
-		{"keep-marker", "system", "[unsupported: encReactionMessage]"},
+		{"keep-system-body", "system", "an existing system notice"},
 		{"keep-voice", "voice", ""}, // media legitimately has empty content
 		{"keep-sticker", "sticker", ""},
 	}
@@ -126,12 +126,12 @@ func TestBackfillLeavesGenuineProtocolRowsAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("backfill: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("rows affected = %d, want 0 — a textless carrier needs no rewrite", n)
+	if n != 1 {
+		t.Errorf("rows affected = %d, want 1 — positively classify this carrier", n)
 	}
 	typ, content := rowOf(t, db, "carrier")
-	if typ != "system" || content != "" {
-		t.Errorf("carrier row changed to (%q,%q)", typ, content)
+	if typ != "system" || content != "[control: senderKeyDistributionMessage]" {
+		t.Errorf("carrier classification is (%q,%q)", typ, content)
 	}
 }
 

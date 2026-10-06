@@ -119,6 +119,11 @@ func extractDownloadableFields(evt *events.Message) (mediaFields, bool) {
 // Mirrors the extractContent / extractContentFromProto split for the same
 // reason: one classifier, so a sent row and a received row cannot disagree.
 func extractDownloadableFieldsFromProto(m *waE2E.Message) (mediaFields, bool) {
+	// View-once content must never acquire a persistent re-download capability.
+	if isProtectedMedia(m) {
+		return mediaFields{}, false
+	}
+	m = unwrapEnvelope(m)
 	if m == nil {
 		return mediaFields{}, false
 	}
