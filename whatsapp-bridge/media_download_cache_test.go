@@ -127,9 +127,7 @@ func TestDownloadMediaRedownloadAfterDeletionIsNotACacheHit(t *testing.T) {
 	if err != nil || string(got) != "fresh" || size != 5 {
 		t.Fatalf("file = %q (err %v) size = %d, want \"fresh\" / 5", got, err, size)
 	}
-	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode = %o, want 0600", st.Mode().Perm())
-	}
+	assertMediaFilePermissions(t, path)
 }
 
 func TestDownloadMediaHandlerReportsCacheEvidenceNotPathEquality(t *testing.T) {

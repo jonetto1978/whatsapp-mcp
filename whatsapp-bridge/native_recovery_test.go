@@ -131,10 +131,7 @@ func TestNativeCachedAudioTranscriptionAndProvenanceReuse(t *testing.T) {
 	if r.State != "complete" || r.Size == 0 || r.Duration <= 0 || r.Transcript == "" || !r.CachedHit || calls.Load() != 1 {
 		t.Fatalf("bad recovery: %+v", r)
 	}
-	st, _ := os.Stat(r.Path)
-	if st.Mode().Perm() != 0o600 {
-		t.Fatal("audio permissions")
-	}
+	assertMediaFilePermissions(t, r.Path)
 	r = b.recoverNativeVoice(context.Background(), a, true, false)
 	if r.State != "complete" || calls.Load() != 1 {
 		t.Fatal("matching transcript not reused")

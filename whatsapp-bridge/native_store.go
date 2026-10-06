@@ -46,14 +46,26 @@ func openNativeStore() (*sql.DB, string, error) {
 	if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
 		return nil, "", errors.New("native chat database is unavailable or unreadable")
 	}
-	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(p)}
-	u.RawQuery = "mode=ro&_query_only=1&_busy_timeout=3000"
-	db, err := sql.Open("sqlite3", u.String())
+	db, err := sql.Open("sqlite3", nativeStoreDSN(p))
 	if err != nil {
 		return nil, "", errors.New("cannot open native chat database read-only")
 	}
 	db.SetMaxOpenConns(1)
 	return db, filepath.Join(filepath.Dir(p), "Message"), nil
+}
+
+// nativeStoreDSN retains URI escaping and read-only options on every OS.
+func nativeStoreDSN(p string) string {
+	slashPath := filepath.ToSlash(p)
+	// A drive path must be absolute in the URI too: without the slash Go
+	// serializes C:/... as file://C:/..., which SQLite reads as authority C:.
+	if len(slashPath) >= 3 && slashPath[1] == ':' && slashPath[2] == '/' &&
+		((slashPath[0] >= 'A' && slashPath[0] <= 'Z') || (slashPath[0] >= 'a' && slashPath[0] <= 'z')) {
+		slashPath = "/" + slashPath
+	}
+	u := &url.URL{Scheme: "file", Path: slashPath}
+	u.RawQuery = "mode=ro&_query_only=1&_busy_timeout=3000"
+	return u.String()
 }
 
 type nativeMessageRow struct {
