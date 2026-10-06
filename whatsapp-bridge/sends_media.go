@@ -419,7 +419,8 @@ func removeOutboundFile(path string) error {
 // sit under an allowed root. Before 2026-09-02 any absolute path was read and
 // sent — chained with the unauthenticated API that was a one-line exfiltration
 // of ~/.ssh or the message database itself (review finding).
-// Roots: WHATSAPP_SEND_FILE_ROOTS (colon-separated), default ~/Downloads and
+// Roots: WHATSAPP_SEND_FILE_ROOTS (OS path-list separator: colon on POSIX,
+// semicolon on Windows), default ~/Downloads and
 // ~/Desktop plus WHATSAPP_MEDIA_DIR when set.
 func confineToSendRoots(p string) (string, error) {
 	abs, err := filepath.Abs(filepath.Clean(p))
@@ -447,7 +448,7 @@ func confineToSendRoots(p string) (string, error) {
 
 func sendFileRoots() []string {
 	if v := os.Getenv("WHATSAPP_SEND_FILE_ROOTS"); v != "" {
-		return strings.Split(v, ":")
+		return filepath.SplitList(v)
 	}
 	home, _ := os.UserHomeDir()
 	roots := []string{filepath.Join(home, "Downloads"), filepath.Join(home, "Desktop")}
